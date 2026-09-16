@@ -27,7 +27,7 @@ void FOriginHierarchy::Rebuild()
         auto Item = MakeShared<FFolderTreeItem>(Folder);
         FNode Node; Node.Item = Item;
         const FFolder Parent = Folder.GetParent();
-        if (!Parent.GetPath().IsNone()) Node.Parent = FFolderTreeItem(Parent).GetID();
+        Node.Parent = FFolderTreeItem(Parent).GetID(); // Empty path is a virtual root for sibling lookup.
         Graph.Add(Item->GetID(), MoveTemp(Node));
         return true;
     });
@@ -38,17 +38,17 @@ void FOriginHierarchy::Rebuild()
         auto Item = MakeShared<FActorTreeItem>(Actor);
         FNode Node; Node.Item = Item;
         if (AActor* Parent = Actor->GetAttachParentActor()) Node.Parent = FActorTreeItem(Parent).GetID();
-        else if (!Actor->GetFolderPath().IsNone()) Node.Parent = FFolderTreeItem(Actor->GetFolder()).GetID();
+        else Node.Parent = FFolderTreeItem(Actor->GetFolder()).GetID();
         Graph.Add(Item->GetID(), MoveTemp(Node));
     }
     TMap<FSceneOutlinerTreeItemID,int32> Remaining;
     for (const auto& Pair : Graph)
     {
         Remaining.Add(Pair.Key,0); DescendantCounts.Add(Pair.Key,0);
-        if (Pair.Value.Parent.IsSet() && Graph.Contains(Pair.Value.Parent.GetValue()))
+        if (Pair.Value.Parent.IsSet())
             Children.Add(Pair.Value.Parent.GetValue(),Pair.Key);
     }
-    for (const auto& Pair : Children) ++Remaining.FindChecked(Pair.Key);
+    for (const auto& Pair : Children) if (int32* Count = Remaining.Find(Pair.Key)) ++*Count;
     TArray<FSceneOutlinerTreeItemID> Leaves;
     for (const auto& Pair : Remaining) if (Pair.Value == 0) Leaves.Add(Pair.Key);
     while (!Leaves.IsEmpty())
@@ -101,35 +101,57 @@ FReply FOriginHierarchy::Select(FSceneOutlinerTreeItemID ID, int32 Action)
     const auto Result = Targets(ID, Action);
     if (Result.IsEmpty()) return FReply::Handled();
     const bool Add = FSlateApplication::Get().GetModifierKeys().IsShiftDown();
-    // Folder rows are Outliner-only selection. Actor selection notifications
-    // clear them, so collect and restore them after the actor update completes.
-    TArray<FSceneOutlinerTreeItemPtr> FoldersToSelect;
-    if (Add) for (const auto& Item : View->GetSelectedItems())
-        if (Item.IsValid() && Item->IsA<FFolderTreeItem>()) FoldersToSelect.AddUnique(Item);
-    GEditor->GetSelectedActors()->BeginBatchSelectOperation();
-    if (!Add) { View->ClearSelection(); GEditor->SelectNone(false,true,false); }
-    int32 HiddenFolders = 0;
-    for (const auto& Target : Result)
+    // Build the entire desired selection first. Do not call SelectActor or
+    // NoteSelectionChange here: their legacy notifications clear folder rows
+    // outside SSceneOutliner's native reentrancy guard.
+    TArray<FSceneOutlinerTreeItemPtr> FinalRows;
+    TSet<FSceneOutlinerTreeItemID> AddedIDs;
+    auto AddRow=[&](const FSceneOutlinerTreeItemPtr& Item)
     {
-        if (const FNode* Node = Graph.Find(Target))
+        if(Item.IsValid() && !AddedIDs.Contains(Item->GetID()))
+        { AddedIDs.Add(Item->GetID()); FinalRows.Add(Item); }
+    };
+    if(Add)
+    {
+        for(const auto& Item:View->GetSelectedItems()) AddRow(Item);
+        // Include selected loaded actors hidden by the Outliner filter. Native
+        // actor browsing reads actors from this selection, not only visible rows.
+        for(AActor* Actor:Origin::SelectedActors())
         {
-            if (const auto* ActorItem = Node->Item->CastTo<FActorTreeItem>())
-            {
-                // This click occurs inside the Outliner, so Focus's Outliner
-                // selection exception applies. Hidden actors can be inspected.
-                if (AActor* Actor = ActorItem->Actor.Get()) GEditor->SelectActor(Actor,true,false,true);
-            }
-            else if (auto ActualItem = View->GetTreeItem(Target)) FoldersToSelect.AddUnique(ActualItem);
+            auto Item=View->GetTreeItem(Actor);
+            if(Item.IsValid()) AddRow(Item);
+            else AddRow(MakeShared<FActorTreeItem>(Actor));
+        }
+    }
+    int32 HiddenFolders=0;
+    FSceneOutlinerTreeItemPtr ParentFolder;
+    for(const auto& Target:Result)
+    {
+        if(auto Item=View->GetTreeItem(Target))
+        {
+            AddRow(Item);
+            if(Action==2 && Item->IsA<FFolderTreeItem>()) ParentFolder=Item;
+        }
+        else if(const FNode* Node=Graph.Find(Target))
+        {
+            if(Node->Item.IsValid() && Node->Item->IsA<FActorTreeItem>()) AddRow(Node->Item);
             else ++HiddenFolders;
         }
     }
-    GEditor->GetSelectedActors()->EndBatchSelectOperation();
-    GEditor->NoteSelectionChange();
-    if (!FoldersToSelect.IsEmpty())
-        View->SetItemSelection(FoldersToSelect,true,ESelectInfo::Direct);
-    if (Action == 2 && FoldersToSelect.Num() == 1)
-        View->ScrollItemIntoView(FoldersToSelect[0]);
-    if (HiddenFolders) Origin::Notify(FText::FromString(TEXT("All matching loaded actors were selected. Clear the Outliner search/filter to also select folder rows hidden by that filter.")));
+    if(FinalRows.IsEmpty())
+    {
+        if(HiddenFolders) Origin::Notify(FText::FromString(TEXT("Clear the Outliner filter to select the matching folder rows.")));
+        return FReply::Handled();
+    }
+    // The array overload in UE 5.8 finishes with ESelectInfo::Direct, even when
+    // passed OnMouseClick. Stage the full list directly, then use the SINGLE
+    // item overload to issue one real selection event without clearing the list.
+    View->SetItemSelection(FinalRows,true,ESelectInfo::Direct);
+    View->AddToSelection(FinalRows.Last(),ESelectInfo::OnMouseClick);
+    // FActorBrowsingMode now updates the typed-element selection within the
+    // Outliner's guard, preserving folders as part of this same operation.
+    if(ParentFolder.IsValid()) View->ScrollItemIntoView(ParentFolder);
+    if(HiddenFolders) Origin::Notify(FText::FromString(TEXT("Matching loaded actors were selected. Clear the Outliner filter to also select folder rows hidden by that filter.")));
     return FReply::Handled();
 }
 TSharedRef<SWidget> FOriginHierarchy::Button(const TSharedRef<FRow>& Row, int32 Action)
@@ -189,6 +211,6 @@ void FOriginHierarchy::Tick(double Now, float)
         const FNode* Node = Graph.Find(Row->ID);
         const bool HasParent = Node && Node->Parent.IsSet() && Graph.Contains(Node->Parent.GetValue());
         Row->Counts[2] = HasParent ? 1 : 0;
-        Row->Counts[3] = HasParent ? FMath::Max(0,Children.Num(Node->Parent.GetValue()) - 1) : 0;
+        Row->Counts[3] = Node && Node->Parent.IsSet() ? FMath::Max(0,Children.Num(Node->Parent.GetValue()) - 1) : 0;
     }
 }

@@ -26,7 +26,19 @@ class ORIGIN_API AOriginAnchor : public AActor
     GENERATED_BODY()
 public:
     AOriginAnchor();
+#if WITH_EDITOR
+    virtual void PostRegisterAllComponents() override;
+    virtual void PostEditUndo() override;
+    void RefreshEditorBillboard();
+    bool IsOriginEditorComponent(const UActorComponent* Component) const;
+#endif
 #if WITH_EDITORONLY_DATA
+    // Editor visualization only. Neither this component nor its visibility
+    // preference is needed in a packaged game.
+    UPROPERTY(Transient)
+    TObjectPtr<class UBillboardComponent> EditorBillboard;
+    UPROPERTY()
+    bool bShowEditorBillboard = true;
     // Custom Details controls commit these together with a pivot move in one transaction.
     UPROPERTY()
     EOriginPivotMode PivotMode = EOriginPivotMode::BoundsCenter;

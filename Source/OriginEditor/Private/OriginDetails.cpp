@@ -1,5 +1,8 @@
 #include "OriginDetails.h"
 #include "OriginOperations.h"
+#include "Editor.h"
+#include "ScopedTransaction.h"
+#include "Widgets/Input/SCheckBox.h"
 #include "Components/SceneComponent.h"
 #include "PropertyCustomizationHelpers.h"
 #include "AssetRegistry/AssetData.h"
@@ -167,6 +170,23 @@ void FOriginDetails::CustomizeDetails(IDetailLayoutBuilder& Builder)
             return Weak.IsValid() && Weak->PivotMode==Mode ? EVisibility::Visible : EVisibility::Collapsed;
         });
     };
+    Category.AddCustomRow(FText::FromString(TEXT("Show Billboard")))
+        .NameContent()[SNew(STextBlock).Text(FText::FromString(TEXT("Show Billboard")))]
+        .ValueContent()
+        [SNew(SCheckBox)
+            .ToolTipText(FText::FromString(TEXT("Show this anchor's clickable viewport marker. Editor only; hide it here to reduce clutter.")))
+            .IsEnabled_Lambda([State] { State->Update(); return State->bCanEdit; })
+            .IsChecked_Lambda([Weak] { return Weak.IsValid() && Weak->bShowEditorBillboard ? ECheckBoxState::Checked : ECheckBoxState::Unchecked; })
+            .OnCheckStateChanged_Lambda([Weak](ECheckBoxState Check) {
+                auto* A=Weak.Get(); FText Reason;
+                if(!Origin::CanOperate(A,Reason)) { Origin::Notify(Reason); return; }
+                const bool Show=Check==ECheckBoxState::Checked;
+                if(A->bShowEditorBillboard==Show) return;
+                const FScopedTransaction Transaction(NSLOCTEXT("Origin","BillboardVisibility","Origin: Change billboard visibility"));
+                A->Modify(); A->bShowEditorBillboard=Show;
+                A->RefreshEditorBillboard(); A->MarkPackageDirty();
+                GEditor->RedrawLevelEditingViewports();
+            })];
     Category.AddCustomRow(FText::FromString(TEXT("Pivot Mode")))
         .NameContent()[SNew(STextBlock).Text(FText::FromString(TEXT("Pivot Mode")))]
         .ValueContent().MinDesiredWidth(240)
@@ -198,19 +218,21 @@ void FOriginDetails::CustomizeDetails(IDetailLayoutBuilder& Builder)
         }))
         .NameContent()[SNew(STextBlock).Text(FText::FromString(TEXT("Child Actor")))]
         .ValueContent().MinDesiredWidth(240)
-        [Choice(State,TEXT("Choose a direct child as the pivot source."),
-            [Weak] { return FText::FromString(Weak.IsValid() && Weak->PivotChild.IsValid() ? Weak->PivotChild->GetActorLabel() : TEXT("Choose a child")); },
-            [State] {
-                FMenuBuilder Menu(true,nullptr);
-                for(AActor* Child:Origin::DirectChildren(State->Anchor.Get()))
-                {
-                    TWeakObjectPtr<AActor> Source=Child;
-                    Entry(Menu,Child->GetActorLabel(),[State,Source] { State->Change([Source](Origin::FPivotSettings& S) {
-                        S.Child=Source.Get(); S.ComponentName=NAME_None; S.SocketName=NAME_None;
-                        if(Source.IsValid() && Source->GetRootComponent()) S.ComponentName=Source->GetRootComponent()->GetFName();
-                    }); });
-                }
-                return Menu.MakeWidget();
+        [SNew(SObjectPropertyEntryBox).AllowedClass(AActor::StaticClass()).AllowClear(true).DisplayThumbnail(false)
+            .ToolTipText(FText::FromString(TEXT("Choose a direct child using the searchable actor picker or viewport eyedropper.")))
+            .IsEnabled_Lambda([State] { State->Update(); return State->bCanEdit; })
+            .ObjectPath_Lambda([Weak] { return Weak.IsValid() ? Weak->PivotChild.ToSoftObjectPath().ToString() : FString(); })
+            .OnShouldFilterActor_Lambda([Weak](const AActor* Candidate) {
+                return Weak.IsValid() && Origin::IsEditorActor(Candidate) && Candidate->GetAttachParentActor()==Weak.Get();
+            })
+            .OnObjectChanged_Lambda([State](const FAssetData& Data) {
+                AActor* Child=Cast<AActor>(Data.GetAsset());
+                auto* Anchor=State->Anchor.Get();
+                if(Child && (!Origin::IsEditorActor(Child) || Child->GetAttachParentActor()!=Anchor)) return;
+                State->Change([Child](Origin::FPivotSettings& S) {
+                    S.Child=Child; S.ComponentName=NAME_None; S.SocketName=NAME_None;
+                    if(Child && Child->GetRootComponent()) S.ComponentName=Child->GetRootComponent()->GetFName();
+                });
             })];
     Category.AddCustomRow(FText::FromString(TEXT("Custom Position"))).Visibility(VisibleMode(EOriginPivotMode::Custom))
         .NameContent()[SNew(STextBlock).Text(FText::FromString(TEXT("World X / Y / Z")))]

@@ -398,8 +398,10 @@ namespace Origin
             // Conversion intentionally supports the exact native class only.
             // Arbitrary extra components would otherwise be discarded by the factory.
             TArray<UActorComponent*> Components; A->GetComponents(Components);
-            if (A->GetClass() != AOriginAnchor::StaticClass() || Components.Num() != 1)
-            { Notify(FText::FromString(TEXT("Removal requires a plain Origin Anchor with only its scene root. Move any added components to a separate actor first."))); return; }
+            if (A->GetClass() != AOriginAnchor::StaticClass() || Components.ContainsByPredicate([A](const UActorComponent* C) {
+                return C && C != A->GetRootComponent() && !A->IsOriginEditorComponent(C);
+            }))
+            { Notify(FText::FromString(TEXT("Removal requires a plain Origin Anchor with only its scene root and built-in editor billboard. Move any added components to a separate actor first."))); return; }
             for (AActor* Parent = A->GetAttachParentActor(); Parent; Parent = Parent->GetAttachParentActor())
                 if (Anchors.Contains(Cast<AOriginAnchor>(Parent)))
                 { Notify(FText::FromString(TEXT("Remove nested anchors separately, starting with the deepest anchor."))); return; }
