@@ -1,18 +1,13 @@
 {
 	"FileVersion": 3,
 	"Version": 1,
-	"VersionName": "1.0.0",
+	"VersionName": "1.0.2",
 	"FriendlyName": "Origin",
-	"Description": "Create assembly anchors with adjustable pivots and navigate actor hierarchies from the World Outliner.",
+	"Description": "Creates flexible assembly pivots with Origin Anchors. Reposition pivots while preserving child world transforms, and quickly select parents, children, descendants, and siblings from the World Outliner.",
 	"Category": "Editor",
-	"CreatedBy": "Mippithedork",
-	"CreatedByURL": "",
-	"DocsURL": "",
-	"MarketplaceURL": "",
-	"SupportURL": "",
-	"EngineVersion": "5.8.0",
 	"CanContainContent": false,
-	"Installed": true,
+	"IsBetaVersion": false,
+	"EnabledByDefault": false,
 	"Modules": [
 		{
 			"Name": "Origin",
@@ -24,5 +19,12 @@
 			"Type": "Editor",
 			"LoadingPhase": "PostEngineInit"
 		}
-	]
+	],
+	"CreatedBy": "Mippithedork",
+	"CreatedByURL": "",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"IsExperimentalVersion": false,
+	"Installed": false
 }
