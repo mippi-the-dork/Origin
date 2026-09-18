@@ -1,3 +1,5 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+
 #include "OriginHierarchy.h"
 #include "OriginOperations.h"
 #include "SSceneOutliner.h"

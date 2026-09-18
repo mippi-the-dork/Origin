@@ -12,15 +12,22 @@
 		{
 			"Name": "Origin",
 			"Type": "Runtime",
-			"LoadingPhase": "Default"
+			"LoadingPhase": "Default",
+			"PlatformAllowList": [
+        		"Win64"
+      			]
 		},
 		{
 			"Name": "OriginEditor",
 			"Type": "Editor",
-			"LoadingPhase": "PostEngineInit"
+			"LoadingPhase": "PostEngineInit",
+			"PlatformAllowList": [
+        		"Win64"
+      			]
 		}
 	],
 	"CreatedBy": "Mippithedork",
+	"EngineVersion": "5.8.0",
 	"CreatedByURL": "",
 	"DocsURL": "",
 	"MarketplaceURL": "",

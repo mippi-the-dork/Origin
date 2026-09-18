@@ -1,3 +1,5 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+
 #include "OriginOperations.h"
 #include "Editor.h"
 #include "Editor/EditorEngine.h"

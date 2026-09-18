@@ -1,3 +1,5 @@
+// Copyright Epic Games, Inc. All Rights Reserved.
+
 #include "OriginAnchor.h"
 #include "Components/SceneComponent.h"
 #if WITH_EDITOR
