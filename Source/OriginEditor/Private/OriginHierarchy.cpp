@@ -2,6 +2,7 @@
 
 #include "OriginHierarchy.h"
 #include "OriginOperations.h"
+#include "OriginHierarchyFeedback.h"
 #include "SSceneOutliner.h"
 #include "ActorTreeItem.h"
 #include "FolderTreeItem.h"
@@ -19,7 +20,10 @@
 #include "Styling/SlateStyleRegistry.h"
 
 FOriginHierarchy::FOriginHierarchy(ISceneOutliner& InOutliner)
-    : Outliner(StaticCastSharedRef<SSceneOutliner>(InOutliner.AsShared())) {}
+    : Outliner(StaticCastSharedRef<SSceneOutliner>(InOutliner.AsShared()))
+{
+    OriginHierarchyFeedback::RegisterOutliner(InOutliner);
+}
 void FOriginHierarchy::Rebuild()
 {
     Graph.Reset(); Children.Reset(); DescendantCounts.Reset();

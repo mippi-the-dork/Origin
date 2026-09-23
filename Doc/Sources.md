@@ -9,6 +9,8 @@ Origin uses Unreal Engine APIs without engine modifications. The Unreal Engine 5
 | `SceneOutlinerModule.h/.cpp` | Actor-browser initialization, custom columns and mode factory. |
 | `ActorBrowsingMode.h`, `ISceneOutlinerMode.h`, `SSceneOutliner.cpp` | Add Anchor toolbar control while retaining standard browsing behavior and the folder button. |
 | `ISceneOutlinerColumn.h`, `ActorTreeItem.h`, `FolderTreeItem.h`, `SceneOutlinerStandaloneTypes.h` | Hierarchy selection controls and actor/folder identities. |
+| `SceneOutlinerDragDrop.h`, `ISceneOutlinerMode.h` | Native drag/drop parsing and validation used to classify parent and deparent previews. |
+| `SWindow.h`, `SBorder.h`, `SlateApplication.h` | Input-transparent edge-strip hierarchy highlight overlays that leave Unreal's native row content and styling uncovered. |
 | `ActorModeInteractive.cpp` | Actor-selection notifications and their effect on folder-row selection. |
 | `SLevelEditor.cpp`, `LevelEditorContextMenu.cpp` | Standard Outliner creation and Level Editor context-menu integration. |
 | `EditorActorFolders.h` | Folder enumeration. |
@@ -32,6 +34,12 @@ Origin uses Unreal Engine APIs without engine modifications. The Unreal Engine 5
 | `DetailLayoutBuilder.h`, `DetailCategoryBuilder.h`, `DetailWidgetRow.h`, `IDetailGroup.h` | Origin category, conditional rows, category ordering and the collapsed Pivot Offset group. |
 | `SDetailCategoryTableRow.cpp` | Category-header icon and label while retaining Unreal's expander. |
 | `PropertyCustomizationHelpers.h/.cpp`, `SPropertyEditorAsset.cpp` | Reference Actor picker, actor filtering and eyedropper. |
+
+## Project settings
+
+Origin exposes hierarchy highlight colors through `UDeveloperSettings` under **Project Settings > Plugins > Origin > Appearance > Hierarchy**. The settings are editor-only and affect drag-preview rendering; they do not change hierarchy mutation behavior.
+
+Hierarchy feedback is independent of Index. If the Index module is loaded, Origin reads Index's editor config at runtime and suppresses hierarchy outlines inside Index's configured reorder edge zones or while Index's force-reorder modifier is held. There is no compile-time or plugin dependency on Index.
 
 ## Optional Focus integration
 

@@ -9,7 +9,7 @@ public class OriginEditor : ModuleRules
         PrivateDependencyModuleNames.AddRange(new[] {
             "Core", "CoreUObject", "Engine", "Origin", "UnrealEd", "Slate", "SlateCore",
             "InputCore", "LevelEditor", "SceneOutliner", "PropertyEditor", "ToolMenus",
-            "Projects", "AssetRegistry", "AssetTools"
+            "Projects", "AssetRegistry", "AssetTools", "DeveloperSettings"
         });
     }
 }

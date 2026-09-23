@@ -4,6 +4,7 @@
 #include "OriginOperations.h"
 #include "OriginDetails.h"
 #include "OriginHierarchy.h"
+#include "OriginHierarchyFeedback.h"
 #include "SceneOutlinerModule.h"
 #include "ActorBrowsingMode.h"
 #include "SSceneOutliner.h"
@@ -12,6 +13,8 @@
 #include "LevelEditor.h"
 #include "Editor.h"
 #include "Framework/Commands/Commands.h"
+#include "Framework/Application/IInputProcessor.h"
+#include "Framework/Application/SlateApplication.h"
 #include "Framework/Commands/UICommandList.h"
 #include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "ToolMenus.h"
@@ -72,6 +75,7 @@ class FOriginEditorModule final : public IModuleInterface
     TSharedPtr<FUICommandList> Commands;
     TWeakPtr<FUICommandList> LevelCommands;
     FDelegateHandle Columns;
+    TSharedPtr<IInputProcessor> HierarchyFeedbackProcessor;
     bool bRegistered = false;
     void RegisterMenus()
     {
@@ -138,6 +142,11 @@ public:
                 return new FOriginBrowsingMode(View,WeakWorld,SharedStyle);
             });
         });
+        if (FSlateApplication::IsInitialized())
+        {
+            HierarchyFeedbackProcessor = OriginHierarchyFeedback::CreateInputProcessor();
+            FSlateApplication::Get().RegisterInputPreProcessor(HierarchyFeedbackProcessor);
+        }
         bRegistered = true;
     }
     virtual void ShutdownModule() override
@@ -145,6 +154,10 @@ public:
         if (!bRegistered) return;
         UToolMenus::UnRegisterStartupCallback(this);
         UToolMenus::UnregisterOwner(this);
+        if (HierarchyFeedbackProcessor.IsValid() && FSlateApplication::IsInitialized())
+            FSlateApplication::Get().UnregisterInputPreProcessor(HierarchyFeedbackProcessor);
+        HierarchyFeedbackProcessor.Reset();
+        OriginHierarchyFeedback::Shutdown();
         if (auto* Outliner = FModuleManager::GetModulePtr<FSceneOutlinerModule>(TEXT("SceneOutliner")))
             Outliner->OnCreateActorBrowserColumns().Remove(Columns);
         if (auto* Properties = FModuleManager::GetModulePtr<FPropertyEditorModule>(TEXT("PropertyEditor")))

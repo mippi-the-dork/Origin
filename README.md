@@ -12,6 +12,7 @@ Origin adds adjustable assembly pivots and hierarchy selection controls to Unrea
 - Choose from nine pivot modes, with optional world-space or anchor-local offsets.
 - Reposition an anchor while preserving its children's world location, rotation and scale.
 - Select parents, siblings, immediate children or all descendants directly from Outliner rows.
+- Preview hierarchy-changing Outliner drags with configurable parent and deparent row highlights.
 - Release children or convert an anchor to a native empty Actor.
 - Undo/Redo for creation, pivot settings, pivot changes and removal operations.
 - Save pivot settings with the level.
@@ -104,6 +105,19 @@ Click replaces the selection; **Shift-click** adds to it. Each action uses the c
 These controls work with ordinary actor attachments and folders as well as Origin Anchors. Selecting a folder selects its row, not every actor inside it. The world root is not offered as a selectable parent, and native actor groups are not treated as attachment parents.
 
 Only loaded actors are included. Actor selection does not depend on branches being expanded. Clear Outliner filters if you also need to select folder rows hidden by those filters.
+
+## Hierarchy drag highlights
+
+Origin adds row-outline visual feedback for hierarchy-changing drag operations in the standard World Outliner. The highlight is preview-only; Unreal still owns the drag/drop operation itself.
+
+- **Parent Highlight Color:** shown when Unreal resolves the drop as attaching actors to an actor or moving rows into a folder/container.
+- **Deparent Highlight Color:** shown when Unreal resolves the drop as detaching actors from their current actor parent.
+
+Configure both colors under **Project Settings > Plugins > Origin > Appearance > Hierarchy**. The defaults are a translucent blue for parenting and a translucent orange for deparenting.
+
+Highlights are rendered as four thin, input-transparent edge overlays around the target row. The native row content remains uncovered, and Origin does not replace the Outliner row background, so labels, icons, hover, and selection styling remain owned by Unreal. Invalid or unrelated drops do not receive a hierarchy highlight.
+
+When Index is enabled, Origin yields Index's configured Before/After edge zones and force-reorder modifier to Index. Parent/deparent outlines are limited to the remaining hierarchy-drop area so reorder lines and hierarchy feedback do not compete.
 
 ## Release or convert an anchor
 

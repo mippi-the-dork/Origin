@@ -1,9 +1,9 @@
 {
 	"FileVersion": 3,
 	"Version": 1,
-	"VersionName": "1.0.3",
+	"VersionName": "1.0.4",
 	"FriendlyName": "Origin",
-	"Description": "Creates flexible assembly pivots with Origin Anchors. Reposition pivots while preserving child world transforms, and quickly select parents, children, descendants, and siblings from the World Outliner.",
+	"Description": "Creates flexible assembly pivots with Origin Anchors, hierarchy selection controls, and parent/deparent drag highlights in the World Outliner.",
 	"Category": "Editor",
 	"CanContainContent": false,
 	"IsBetaVersion": false,
