@@ -611,35 +611,7 @@ It only makes Unreal's resolved hierarchy operation easier to see before you rel
 
 Invalid or unrelated drops receive no Origin hierarchy highlight.
 
-> [!IMPORTANT]  
-> **ATTENTION - README AUTHOR**
-> 
-> This behavior is much easier to understand in motion.
-> 
-> **Recommended visual:** GIF
-> 
-> Show:
-> 
-> 1. Drag an Actor over another Actor until the Parent highlight appears.
->     
-> 2. Complete the parenting operation.
->     
-> 3. Drag the Actor into a position that will deparent it.
->     
-> 4. Show the Deparent highlight.
->     
-> 
-> Make sure the mouse movement is slow enough for each highlight color to be clearly visible.
-> 
-> A simple hierarchy with 3 to 5 Actors is better than a crowded Outliner.
-> 
-> **Suggested file:** `Doc/Images/Origin-Hierarchy-Drag.gif`
-> 
-> Once captured, replace this callout with:
-> 
-> ```
-> ![Origin hierarchy parenting and deparenting feedback](Doc/Images/Origin-Hierarchy-Drag.gif)
-> ```
+![Origin hierarchy parenting and deparenting feedback](Doc/Images/Origin-Hierarchy-Drag.gif)
 
 ---
 
