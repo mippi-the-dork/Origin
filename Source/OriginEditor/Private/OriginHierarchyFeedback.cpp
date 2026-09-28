@@ -1,3 +1,5 @@
+// Copyright Mippithedork 2026, Inc. All Rights Reserved.
+
 #include "OriginHierarchyFeedback.h"
 
 #include "ActorFolderTreeItem.h"

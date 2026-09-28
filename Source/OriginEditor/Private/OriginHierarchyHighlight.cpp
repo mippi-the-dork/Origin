@@ -1,3 +1,5 @@
+// Copyright Mippithedork 2026, Inc. All Rights Reserved.
+
 #include "OriginHierarchyHighlight.h"
 
 #include "Framework/Application/SlateApplication.h"
