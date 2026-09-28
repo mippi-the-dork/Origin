@@ -134,41 +134,7 @@ Origin Anchor settings are saved with the level.
 
 ---
 
-> [!IMPORTANT]  
-> **ATTENTION - README AUTHOR**
-> 
-> This should be the main demonstration of what Origin actually does.
-> 
-> **Recommended visual:** GIF
-> 
-> Show:
-> 
-> 1. Several Actors selected.
->     
-> 2. Click **Create Origin Anchor**.
->     
-> 3. Show the new anchor in the World Outliner.
->     
-> 4. Move or rotate the anchor so the whole assembly moves together.
->     
-> 5. Change the pivot mode or position.
->     
-> 6. Show the pivot move while the child Actors remain stationary.
->     
-> 7. Move or rotate the anchor again from its new pivot.
->     
-> 
-> Keep the example simple enough that the preserved child transforms are obvious.
-> 
-> Around 8 to 12 seconds would work well here.
-> 
-> **Suggested file:** `Doc/Images/Origin-Assembly.gif`
-> 
-> Once captured, replace this callout with:
-> 
-> ```
-> ![Creating and adjusting an Origin Anchor](Doc/Images/Origin-Assembly.gif)
-> ```
+![Creating and adjusting an Origin Anchor](Doc/Images/Origin-Assembly.gif)
 
 ---
 
