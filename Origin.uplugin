@@ -4,7 +4,7 @@
 	"VersionName": "1.0.4",
 	"FriendlyName": "Origin",
 	"Description": "Creates flexible assembly pivots with Origin Anchors, hierarchy selection controls, and parent/deparent drag highlights in the World Outliner.",
-	"Category": "Editor",
+	"Category": "World Outliner",
 	"CanContainContent": false,
 	"IsBetaVersion": false,
 	"EnabledByDefault": false,
