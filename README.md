@@ -153,7 +153,7 @@ Origin has two primary workflows:
 
 Select the Actors you want to turn into an assembly.
 
-Then click the **Create Origin Anchor** button beside the World Outliner search controls.
+Then click **Create Origin Anchor** in the World Outliner toolbar, immediately to the left of Unreal's **New Folder** button. This button is independent of the Origin hierarchy column.
 
 You can also use:
 
@@ -813,8 +813,8 @@ Download the latest packaged plugin from the release's **Assets** section that m
 For the current release, use the package built for:
 
 ```
-Origin 1.0.4
-Unreal Engine 5.8.2
+Origin 1.0.6
+Unreal Engine 5.8.3
 Windows 64-bit
 ```
 
@@ -972,15 +972,15 @@ The current Origin release targets:
 
 |||
 |---|---|
-|**Origin Version**|1.0.4|
-|**Unreal Engine**|5.8.2|
+|**Origin Version**|1.0.6|
+|**Unreal Engine**|5.8.3 (source reviewed; compile and PIE test required)|
 |**Platform**|Windows 64-bit|
 |**Authoring Tools**|Editor|
 |**Origin Anchor**|Runtime Actor|
 |**Engine Modifications**|None|
 |**Packaged Game Support**|Designed for packaged games, not yet verified|
 
-Origin is currently distributed for Unreal Engine 5.8.2 on Windows 64-bit.
+This source update targets Unreal Engine 5.8.3 on Windows 64-bit. It requires compilation and in-editor PIE validation before release.
 
 Compatibility with additional Unreal Engine versions or platforms should not be assumed unless explicitly listed in a release.
 
@@ -1078,6 +1078,10 @@ Origin operates on Actor assemblies rather than changing the underlying assets t
 ### PIE and Simulation
 
 Origin authoring operations are unavailable during PIE or simulation.
+
+Origin does not replace Unreal's actor-browsing mode or supply any World Outliner world/Actor filters. The Outliner remains responsible for switching between editor, PIE and simulation worlds, including displaying runtime-spawned Actors. Origin's assembly tools remain disabled during play.
+
+The Create Origin Anchor button appears in the World Outliner toolbar immediately before Unreal's New Folder button. Origin adds one Slate slot after the native toolbar is constructed; it never overrides the Actor Browsing Mode factory or changes Outliner world selection. If a future engine revision changes the toolbar structure, Origin leaves the toolbar untouched instead of risking an incorrect insertion. This small toolbar integration is version-specific to Unreal 5.8.
 
 Configure assemblies in the normal editor world.
 

@@ -3,6 +3,7 @@
 #include "OriginHierarchy.h"
 #include "OriginOperations.h"
 #include "OriginHierarchyFeedback.h"
+#include "OriginOutlinerToolbar.h"
 #include "SSceneOutliner.h"
 #include "ActorTreeItem.h"
 #include "FolderTreeItem.h"
@@ -12,6 +13,8 @@
 #include "Selection.h"
 #include "Framework/Application/SlateApplication.h"
 #include "Widgets/SBoxPanel.h"
+#include "Widgets/Text/STextBlock.h"
+#include "Widgets/Views/SHeaderRow.h"
 #include "Widgets/SNullWidget.h"
 #include "Widgets/Input/SButton.h"
 #include "Widgets/Layout/SBox.h"
@@ -23,6 +26,7 @@ FOriginHierarchy::FOriginHierarchy(ISceneOutliner& InOutliner)
     : Outliner(StaticCastSharedRef<SSceneOutliner>(InOutliner.AsShared()))
 {
     OriginHierarchyFeedback::RegisterOutliner(InOutliner);
+    OriginOutlinerToolbar::Schedule(StaticCastSharedRef<SSceneOutliner>(InOutliner.AsShared()));
 }
 void FOriginHierarchy::Rebuild()
 {

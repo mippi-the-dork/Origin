@@ -6,8 +6,6 @@
 #include "OriginHierarchy.h"
 #include "OriginHierarchyFeedback.h"
 #include "SceneOutlinerModule.h"
-#include "ActorBrowsingMode.h"
-#include "SSceneOutliner.h"
 #include "SceneOutlinerPublicTypes.h"
 #include "PropertyEditorModule.h"
 #include "LevelEditor.h"
@@ -25,10 +23,6 @@
 #include "Textures/SlateIcon.h"
 #include "Interfaces/IPluginManager.h"
 #include "Misc/Paths.h"
-#include "Widgets/SBoxPanel.h"
-#include "Widgets/Input/SButton.h"
-#include "Widgets/Images/SImage.h"
-#include "Widgets/Layout/SBox.h"
 
 class FOriginCommands : public TCommands<FOriginCommands>
 {
@@ -43,29 +37,6 @@ public:
         UI_COMMAND(Create,"Create Origin Anchor","Create an anchor above the selected actors, preserving their world transforms. With no actors selected, create an empty anchor at world origin.",EUserInterfaceActionType::Button,FInputChord());
         UI_COMMAND(Convert,"Convert Selected Origin Anchors","Replace selected anchors with native empty Actors while preserving the assembly.",EUserInterfaceActionType::Button,FInputChord());
 #undef LOCTEXT_NAMESPACE
-    }
-};
-
-/** Standard actor browsing behavior, with one extra toolbar widget. */
-class FOriginBrowsingMode final : public FActorBrowsingMode
-{
-    TSharedPtr<FSlateStyleSet> Style;
-public:
-    FOriginBrowsingMode(SSceneOutliner* View, TWeakObjectPtr<UWorld> World, TSharedPtr<FSlateStyleSet> InStyle)
-        : FActorBrowsingMode(View,World), Style(MoveTemp(InStyle)) {}
-    virtual bool CanCustomizeToolbar() const override { return true; }
-    virtual void CustomAddToToolbar(TSharedPtr<SHorizontalBox> Toolbar) override
-    {
-        const auto KeepStyle = Style;
-        Toolbar->AddSlot().AutoWidth().VAlign(VAlign_Center).Padding(4,0,0,0)
-        [SNew(SButton).ButtonStyle(FAppStyle::Get(),TEXT("SimpleButton"))
-            .ToolTipText(FText::FromString(TEXT("Create Origin Anchor\nParent selected actors beneath an anchor without changing their world transforms. With no selection, create an empty anchor at world origin.")))
-            .IsEnabled_Lambda([] { return GEditor && !GEditor->PlayWorld; })
-            .OnClicked_Lambda([] { Origin::CreateAnchor(); return FReply::Handled(); })
-            [SNew(SBox).WidthOverride(18).HeightOverride(18)
-                [SNew(SImage).Image(KeepStyle->GetBrush(TEXT("Origin.AnchorAdd"))).ColorAndOpacity(FSlateColor::UseForeground())]]];
-        // SupportsCreateNewFolder remains inherited and true. SSceneOutliner
-        // appends the native folder button separately after custom controls.
     }
 };
 
@@ -126,9 +97,10 @@ public:
         auto& Properties = FModuleManager::LoadModuleChecked<FPropertyEditorModule>(TEXT("PropertyEditor"));
         Properties.RegisterCustomClassLayout(AOriginAnchor::StaticClass()->GetFName(),FOnGetDetailCustomizationInstance::CreateLambda([] { return MakeShared<FOriginDetails>(); }));
         Properties.NotifyCustomizationModuleChanged();
-        const auto SharedStyle = Style;
         auto& Outliner = FModuleManager::LoadModuleChecked<FSceneOutlinerModule>(TEXT("SceneOutliner"));
-        Columns = Outliner.OnCreateActorBrowserColumns().AddLambda([SharedStyle](FSceneOutlinerInitializationOptions& Options,UWorld* World) {
+        // Register only Origin's own column. Actor browsing, world selection,
+        // filters and PIE/SIE behavior remain entirely owned by Unreal.
+        Columns = Outliner.OnCreateActorBrowserColumns().AddLambda([](FSceneOutlinerInitializationOptions& Options, UWorld*) {
             const FName LabelID = FSceneOutlinerBuiltInColumnTypes::Label();
             const auto* Label = Options.ColumnMap.Find(LabelID);
             const uint8 AfterLabel = Label ? FMath::Min<int32>(Label->PriorityIndex + 1,254) : 11;
@@ -137,10 +109,6 @@ public:
             Options.ColumnMap.Add(FOriginHierarchy::ID(), FSceneOutlinerColumnInfo(ESceneOutlinerColumnVisibility::Visible,AfterLabel,
                 FCreateSceneOutlinerColumn::CreateLambda([](ISceneOutliner& View) { return MakeShared<FOriginHierarchy>(View); }),
                 true,TOptional<float>(),FText::FromString(TEXT("Origin"))));
-            const TWeakObjectPtr<UWorld> WeakWorld(World);
-            Options.ModeFactory = FCreateSceneOutlinerMode::CreateLambda([WeakWorld,SharedStyle](SSceneOutliner* View) -> ISceneOutlinerMode* {
-                return new FOriginBrowsingMode(View,WeakWorld,SharedStyle);
-            });
         });
         if (FSlateApplication::IsInitialized())
         {
@@ -170,7 +138,6 @@ public:
         Commands.Reset();
         FOriginCommands::Unregister();
         FSlateStyleRegistry::UnRegisterSlateStyle(*Style);
-        // Existing Outliner modes retain shared style ownership until destroyed.
         Style.Reset(); bRegistered = false;
     }
     virtual bool SupportsDynamicReloading() override { return false; }
