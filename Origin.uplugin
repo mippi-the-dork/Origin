@@ -1,12 +1,12 @@
 {
 	"FileVersion": 3,
-	"Version": 3,
-	"VersionName": "1.0.6",
+	"Version": 4,
+	"VersionName": "2.0.0-alpha.1",
 	"FriendlyName": "Origin",
-	"Description": "Creates flexible assembly pivots with Origin Anchors, hierarchy selection controls, and parent/deparent drag highlights in the World Outliner.",
+	"Description": "Origin pivots for Actor assemblies and Blueprint component hierarchies. Version 2.0 alpha development preview.",
 	"Category": "World Outliner",
 	"CanContainContent": false,
-	"IsBetaVersion": false,
+	"IsBetaVersion": true,
 	"EnabledByDefault": false,
 	"Modules": [
 		{
