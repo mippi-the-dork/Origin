@@ -158,6 +158,7 @@ namespace Origin
         A->BoundsAxes=S.BoundsAxes; A->ReferenceActor=S.Reference;
         A->PivotComponentName=S.ComponentName; A->PivotSocketName=S.SocketName;
         A->OriginPivotOffset=S.Offset; A->bLocalPivotOffset=S.bLocalOffset;
+        A->SyncLegacyPivotToRuntimeDefinition();
     }
     static bool SameSettings(const FPivotSettings& A, const FPivotSettings& B)
     {

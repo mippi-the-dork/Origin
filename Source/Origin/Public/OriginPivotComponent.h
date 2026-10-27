@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "Components/SceneComponent.h"
 #include "OriginPivotCore.h"
+#include "OriginPivotTypes.h"
 #include "OriginPivotComponent.generated.h"
 
 DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOriginPivotChangedSignature,
@@ -27,6 +28,10 @@ class ORIGIN_API UOriginPivotComponent : public USceneComponent
 
 public:
     UOriginPivotComponent();
+
+    /** Shared runtime data shape; slot authoring/activation is not enabled in Alpha 2. */
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Origin|Pivot|Slots")
+    FOriginPivotConfiguration OriginPivotConfiguration;
 
     /** Fires only for successful Origin pivot edits, not ordinary SceneComponent movement. */
     UPROPERTY(BlueprintAssignable, Category="Origin|Pivot")

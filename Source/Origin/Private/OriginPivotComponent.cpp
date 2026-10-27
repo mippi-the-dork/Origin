@@ -6,6 +6,8 @@ UOriginPivotComponent::UOriginPivotComponent()
 {
     PrimaryComponentTick.bCanEverTick = false;
     SetMobility(EComponentMobility::Movable);
+    OriginPivotConfiguration.SchemaVersion = 1;
+    OriginPivotConfiguration.Slots.AddDefaulted();
 }
 
 EOriginPivotResult UOriginPivotComponent::CanSetOriginPivotWorldTransform(

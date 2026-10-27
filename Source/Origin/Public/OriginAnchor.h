@@ -4,22 +4,8 @@
 
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
+#include "OriginPivotTypes.h"
 #include "OriginAnchor.generated.h"
-
-UENUM()
-enum class EOriginPivotMode : uint8
-{
-    BoundsCenter UMETA(DisplayName="Bounds Center"),
-    AverageChildPivots UMETA(DisplayName="Average Child Pivots"),
-    BottomCenter UMETA(DisplayName="Bottom Center"),
-    ChildActor UMETA(DisplayName="Child Actor"),
-    WorldOrigin UMETA(DisplayName="World Origin"),
-    Custom UMETA(DisplayName="Custom"),
-    // Append modes so existing levels retain their serialized enum values.
-    BoundsPoint UMETA(DisplayName="Bounds Point"),
-    ReferenceActor UMETA(DisplayName="Reference Actor"),
-    ComponentSocket UMETA(DisplayName="Component / Socket")
-};
 
 /** A runtime transform parent. Pivot calculation and all UI live in OriginEditor. */
 UCLASS(NotBlueprintable, ClassGroup=(Origin), meta=(DisplayName="Origin Anchor"))
@@ -28,6 +14,22 @@ class ORIGIN_API AOriginAnchor : public AActor
     GENERATED_BODY()
 public:
     AOriginAnchor();
+
+    virtual void PostLoad() override;
+    virtual void PostActorCreated() override;
+
+    /** Read a migrated, runtime-safe pivot definition (does not move the Actor). */
+    UFUNCTION(BlueprintPure, Category="Origin|Pivot|Slots", meta=(DisplayName="Get Origin Pivot Slot Definition"))
+    bool GetOriginPivotSlotDefinition(FName SlotName, FOriginPivotDefinition& OutDefinition) const;
+
+    /** Read only in Alpha 2. Named slot editing and switching are later phases. */
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Origin|Pivot|Migration")
+    FOriginPivotConfiguration OriginPivotConfiguration;
+
+#if WITH_EDITOR
+    /** Synchronize the legacy editor-authoring fields into the Default runtime slot. */
+    void SyncLegacyPivotToRuntimeDefinition();
+#endif
 #if WITH_EDITOR
     virtual void PostRegisterAllComponents() override;
     virtual void PostEditUndo() override;
