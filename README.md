@@ -1,5 +1,5 @@
 > **Origin 2.0.0-alpha.1 development preview**  
-> This package retains the complete Origin 1.0.6 editor functionality and adds the initial runtime **Origin Pivot Component** and Blueprint callable pivot-preserving edit operation. This is not the completed 2.0 release. See [2.0 Roadmap](Doc/ROADMAP_2_0.md), [Blueprint Runtime Component](Doc/BLUEPRINT_RUNTIME_COMPONENT.md), and [Test Plan](Doc/TEST_PLAN_2_0.md). UE 5.8.3 compilation and runtime behavior still require verification. Existing Anchors have not yet been migrated or refactored. The 1.x descriptions below document the stable editor features.
+> This package retains the complete Origin 1.0.6 editor functionality and adds the initial runtime **Origin Pivot Component** and Blueprint callable pivot-preserving edit operation. This is not the completed 2.0 release. UE 5.8.3 compilation and runtime behavior still require verification. Existing Anchors have not yet been migrated or refactored. The 1.x descriptions below document the stable editor features.
 
 # Origin
 
