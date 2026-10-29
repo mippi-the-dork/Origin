@@ -17,8 +17,8 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOriginPivotChangedSignature,
  * Ordinary movement uses standard SceneComponent transform nodes; special pivot
  * editing keeps the attached assembly stationary instead of moving it.
  *
- * Version 2.0 alpha 1: explicit pivot edits only; slots, migration, and replicated
- * pivot-authoring state will be introduced in later, separately tested phases.
+ * Alpha 3: editor numeric authoring for placed instances; slot activation,
+ * viewport gizmos and replicated pivot-authoring state remain later phases.
  */
 UCLASS(ClassGroup=(Origin), BlueprintType, Blueprintable,
     meta=(BlueprintSpawnableComponent, DisplayName="Origin Pivot"))
@@ -32,6 +32,10 @@ public:
     /** Shared runtime data shape; slot authoring/activation is not enabled in Alpha 2. */
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Origin|Pivot|Slots")
     FOriginPivotConfiguration OriginPivotConfiguration;
+
+    /** Read a stored pivot definition without changing the component transform. */
+    UFUNCTION(BlueprintPure, Category="Origin|Pivot|Slots", meta=(DisplayName="Get Origin Pivot Slot Definition"))
+    bool GetOriginPivotSlotDefinition(FName SlotName, FOriginPivotDefinition& OutDefinition) const;
 
     /** Fires only for successful Origin pivot edits, not ordinary SceneComponent movement. */
     UPROPERTY(BlueprintAssignable, Category="Origin|Pivot")

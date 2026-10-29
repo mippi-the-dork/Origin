@@ -114,6 +114,9 @@ namespace
 }
 void FOriginDetails::CustomizeDetails(IDetailLayoutBuilder& Builder)
 {
+    // Migrated runtime data is not a second set of editor controls.
+    // Legacy fields remain authoritative until functional slot authoring lands.
+    Builder.HideProperty(TEXT("OriginPivotConfiguration"));
     TArray<TWeakObjectPtr<UObject>> Objects; Builder.GetObjectsBeingCustomized(Objects);
     auto& Category = Builder.EditCategory(TEXT("Origin"), FText::FromString(TEXT("Origin")), ECategoryPriority::Important);
     // Whole-row header replaces the default text, while Unreal retains its

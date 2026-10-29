@@ -3,6 +3,8 @@
 #include "Modules/ModuleManager.h"
 #include "OriginOperations.h"
 #include "OriginDetails.h"
+#include "OriginPivotComponentDetails.h"
+#include "OriginPivotComponent.h"
 #include "OriginHierarchy.h"
 #include "OriginHierarchyFeedback.h"
 #include "SceneOutlinerModule.h"
@@ -96,6 +98,7 @@ public:
         UToolMenus::RegisterStartupCallback(FSimpleMulticastDelegate::FDelegate::CreateRaw(this,&FOriginEditorModule::RegisterMenus));
         auto& Properties = FModuleManager::LoadModuleChecked<FPropertyEditorModule>(TEXT("PropertyEditor"));
         Properties.RegisterCustomClassLayout(AOriginAnchor::StaticClass()->GetFName(),FOnGetDetailCustomizationInstance::CreateLambda([] { return MakeShared<FOriginDetails>(); }));
+        Properties.RegisterCustomClassLayout(UOriginPivotComponent::StaticClass()->GetFName(),FOnGetDetailCustomizationInstance::CreateLambda([] { return MakeShared<FOriginPivotComponentDetails>(); }));
         Properties.NotifyCustomizationModuleChanged();
         auto& Outliner = FModuleManager::LoadModuleChecked<FSceneOutlinerModule>(TEXT("SceneOutliner"));
         // Register only Origin's own column. Actor browsing, world selection,
@@ -129,7 +132,10 @@ public:
         if (auto* Outliner = FModuleManager::GetModulePtr<FSceneOutlinerModule>(TEXT("SceneOutliner")))
             Outliner->OnCreateActorBrowserColumns().Remove(Columns);
         if (auto* Properties = FModuleManager::GetModulePtr<FPropertyEditorModule>(TEXT("PropertyEditor")))
-            Properties->UnregisterCustomClassLayout(AOriginAnchor::StaticClass()->GetFName());
+            {
+                Properties->UnregisterCustomClassLayout(AOriginAnchor::StaticClass()->GetFName());
+                Properties->UnregisterCustomClassLayout(UOriginPivotComponent::StaticClass()->GetFName());
+            }
         if (Commands)
         {
             Commands->UnmapAction(FOriginCommands::Get().Create);

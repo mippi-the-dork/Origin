@@ -1,7 +1,7 @@
 {
 	"FileVersion": 3,
-	"Version": 5,
-	"VersionName": "2.0.0-alpha.2",
+	"Version": 7,
+	"VersionName": "2.0.0-alpha.3-hotfix.1",
 	"FriendlyName": "Origin",
 	"Description": "Origin pivots for Actor assemblies and Blueprint component hierarchies. Version 2.0 alpha development preview.",
 	"Category": "World Outliner",

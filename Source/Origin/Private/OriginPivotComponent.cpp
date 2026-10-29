@@ -10,6 +10,16 @@ UOriginPivotComponent::UOriginPivotComponent()
     OriginPivotConfiguration.Slots.AddDefaulted();
 }
 
+bool UOriginPivotComponent::GetOriginPivotSlotDefinition(FName SlotName, FOriginPivotDefinition& OutDefinition) const
+{
+    if (const FOriginPivotSlot* Slot = OriginPivotConfiguration.FindSlot(SlotName))
+    {
+        OutDefinition = Slot->Definition;
+        return true;
+    }
+    return false;
+}
+
 EOriginPivotResult UOriginPivotComponent::CanSetOriginPivotWorldTransform(
     const FTransform& NewPivotWorldTransform, FText& FailureReason) const
 {
