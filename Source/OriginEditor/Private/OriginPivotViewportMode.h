@@ -19,6 +19,11 @@ public:
     static bool IsEditing(const UOriginPivotComponent* Pivot);
     static bool Toggle(UOriginPivotComponent* Pivot);
     static void Shutdown();
+    /** Blueprint ITF gizmos need not populate the legacy widget axis. */
+    static bool CanStartTracking(bool bBlueprint, bool bHasLegacyWidgetAxis)
+    {
+        return bBlueprint || bHasLegacyWidgetAxis;
+    }
     // Read-only world-space offsets from the position/rotation when viewport editing began.
     // They are already applied, not pending numeric edits.
     static bool GetLiveEditDeltas(const UOriginPivotComponent* Pivot, FVector& OutTranslationCm, FRotator& OutRotationDegrees);

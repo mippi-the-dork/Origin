@@ -337,7 +337,11 @@ void FOriginPivotViewportMode::Tick(FEditorViewportClient* ViewportClient, float
     if (BlueprintAsset.IsValid() && ViewportClient && FSlateApplication::IsInitialized())
     {
         const bool bLeftHeld = FSlateApplication::Get().GetPressedMouseButtons().Contains(EKeys::LeftMouseButton);
-        if (!bTracking && bLeftHeld && ViewportClient->GetCurrentWidgetAxis() != EAxisList::None)
+        // The Blueprint component editor can route its interactive gizmo
+        // through ITF without populating the legacy EAxisList field. Capture
+        // the drag at mouse-down instead of waiting for a legacy axis or delta.
+        // An unrelated click yields an empty transaction, canceled on release.
+        if (!bTracking && bLeftHeld)
         {
             if (StartTracking(ViewportClient, nullptr)) bFallbackTracking = true;
         }
@@ -427,8 +431,11 @@ FVector FOriginPivotViewportMode::GetWidgetLocation() const
 bool FOriginPivotViewportMode::StartTracking(FEditorViewportClient* ViewportClient, FViewport* Viewport)
 {
     if (bTracking) return true;
-    if (!IsValidTarget() || !ViewportClient ||
-        ViewportClient->GetCurrentWidgetAxis() == EAxisList::None) return false;
+    if (!IsValidTarget() || !ViewportClient) return false;
+    // Level Editor uses the native axis for drag eligibility. Blueprint gizmos
+    // may have no legacy axis even while actively moving a component.
+    if (!CanStartTracking(BlueprintAsset.IsValid(),
+            ViewportClient->GetCurrentWidgetAxis() != EAxisList::None)) return false;
     if (BlueprintAsset.IsValid())
     {
         UOriginPivotComponent* Pivot = Target.Get();
@@ -446,7 +453,10 @@ bool FOriginPivotViewportMode::StartTracking(FEditorViewportClient* ViewportClie
 bool FOriginPivotViewportMode::InputDelta(FEditorViewportClient* ViewportClient, FViewport* Viewport,
     FVector& Drag, FRotator& Rotation, FVector& Scale)
 {
-    if (!ViewportClient || ViewportClient->GetCurrentWidgetAxis() == EAxisList::None) return false;
+    if (!ViewportClient ||
+        !CanStartTracking(BlueprintAsset.IsValid(),
+            ViewportClient->GetCurrentWidgetAxis() != EAxisList::None))
+        return false;
     if (!bTracking && BlueprintAsset.IsValid())
     {
         if (StartTracking(ViewportClient, Viewport)) bFallbackTracking = true;

@@ -43,6 +43,11 @@ namespace OriginBlueprintPivot
     /** Pure transform compensation. Safe to exercise without constructing a Blueprint asset or SCS. */
     bool CompensateChild(const FTransform& BeforePivot, const FTransform& AfterPivot,
         const FTransform& BeforeChild, FTransform& OutAfterChild);
+    /** Reconcile an actual preview attachment using a drag-start baseline.
+     * Does not edit component templates or initiate a transaction; intended
+     * for the native Blueprint gizmo path after it moves the preview hierarchy. */
+    bool ReconcilePreviewChild(USceneComponent* PreviewPivot, USceneComponent* PreviewChild,
+        const FTransform& InitialPivot, const FTransform& InitialChild);
     bool Plan(UOriginPivotComponent* Pivot, const FTransform& NewRelative, FPlan& OutPlan, FText& OutReason);
     void Apply(UOriginPivotComponent* Pivot, const FPlan& Plan, bool bUseAfter);
 }

@@ -265,6 +265,20 @@ bool OriginBlueprintPivot::Plan(UOriginPivotComponent* Pivot, const FTransform& 
     return true;
 }
 
+
+bool OriginBlueprintPivot::ReconcilePreviewChild(USceneComponent* PreviewPivot,
+    USceneComponent* PreviewChild, const FTransform& InitialPivot,
+    const FTransform& InitialChild)
+{
+    if (!IsValid(PreviewPivot) || !IsValid(PreviewChild) ||
+        PreviewChild->GetAttachParent() != PreviewPivot) return false;
+    FTransform Compensated;
+    if (!CompensateChild(InitialPivot, PreviewPivot->GetRelativeTransform(),
+            InitialChild, Compensated)) return false;
+    SetTemplateRelative(PreviewChild, Compensated);
+    return PreviewChild->GetRelativeTransform().Equals(Compensated, 1.e-3);
+}
+
 void OriginBlueprintPivot::Apply(UOriginPivotComponent* Pivot, const FPlan& Plan, bool bUseAfter)
 {
     TRACE_CPUPROFILER_EVENT_SCOPE(Origin_BlueprintPivotApply);
@@ -282,7 +296,10 @@ void OriginBlueprintPivot::Apply(UOriginPivotComponent* Pivot, const FPlan& Plan
     Resolve(Pivot, OwnerBlueprint, PivotNode);
     if (PivotNode)
     {
-        if (USceneComponent* Preview = FindPreviewComponent(OwnerBlueprint, PivotNode))
+        // Keep the active preview pivot available for child reconciliation.
+        // Declaring it inside the conditional would leave it out of scope below.
+        USceneComponent* Preview = FindPreviewComponent(OwnerBlueprint, PivotNode);
+        if (Preview)
         {
             SetTemplateRelative(Preview, PivotRelative);
         }
@@ -292,7 +309,16 @@ void OriginBlueprintPivot::Apply(UOriginPivotComponent* Pivot, const FPlan& Plan
             {
                 if (USceneComponent* PreviewChild = FindPreviewComponent(OwnerBlueprint, ChildNode))
                 {
-                    SetTemplateRelative(PreviewChild, bUseAfter ? Child.After : Child.Before);
+                    // Native Blueprint gizmos can move an entire preview
+                    // attachment tree before Origin's editor mode receives the
+                    // delta. Reconcile against the drag-start SCS baseline,
+                    // not the already-moved child preview position.
+                    if (Preview && !ReconcilePreviewChild(Preview, PreviewChild,
+                            Plan.BeforePivot, Child.Before))
+                    {
+                        UE_LOG(LogTemp, Warning, TEXT("Origin: Preview child '%s' cannot be reconciled; authored child template was updated, preview requires rebuild."),
+                            *ChildNode->GetVariableName().ToString());
+                    }
                 }
             }
         }
@@ -410,6 +436,10 @@ bool FOriginBlueprintPivotEditSession::Apply(const FTransform& NewRelative, FTex
         if (bChanged) Cancel();
         return false;
     }
+    // Plan() observes the current template, which the Blueprint editor may
+    // already have moved natively. Subsequent preview reconciliation must
+    // instead use the immutable beginning-of-drag pivot frame.
+    Plan.BeforePivot = InitialPivot;
     bool bRequiresApply = !Pivot->GetRelativeTransform().Equals(NewRelative, 1.e-5);
     for (OriginBlueprintPivot::FChildTransform& Child : Plan.Children)
     {
@@ -425,6 +455,7 @@ bool FOriginBlueprintPivotEditSession::Apply(const FTransform& NewRelative, FTex
             if (bChanged) Cancel();
             return false;
         }
+        Child.Before = Original->Before;
         if (USceneComponent* ChildTemplate = Child.Template.Get())
             bRequiresApply |= !ChildTemplate->GetRelativeTransform().Equals(Child.After, 1.e-5);
     }
