@@ -23,12 +23,20 @@ class FOriginHierarchy final : public ISceneOutlinerColumn
     TMap<FSceneOutlinerTreeItemID,int32> DescendantCounts;
     TArray<TWeakPtr<FRow>> Rows;
     double NextUpdate = 0;
+    FDelegateHandle ActorAddedHandle;
+    FDelegateHandle ActorDeletedHandle;
+    FDelegateHandle ActorAttachedHandle;
+    FDelegateHandle ActorDetachedHandle;
+    FDelegateHandle ActorFolderHandle;
+    FDelegateHandle ActorFoldersUpdatedHandle;
+    void InvalidateStructure() { NextUpdate = 0; }
     void Rebuild();
     TArray<FSceneOutlinerTreeItemID> Targets(FSceneOutlinerTreeItemID ID, int32 Action) const;
     FReply Select(FSceneOutlinerTreeItemID ID, int32 Action);
     TSharedRef<SWidget> Button(const TSharedRef<FRow>& Row, int32 Action);
 public:
     explicit FOriginHierarchy(ISceneOutliner& InOutliner);
+    virtual ~FOriginHierarchy() override;
     static FName ID() { return TEXT("Origin.Hierarchy"); }
     virtual FName GetColumnID() override { return ID(); }
     virtual SHeaderRow::FColumn::FArguments ConstructHeaderRowColumn() override;

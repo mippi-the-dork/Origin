@@ -2,9 +2,12 @@
 
 #include "Modules/ModuleManager.h"
 #include "OriginOperations.h"
+#include "OriginPerformance.h"
 #include "OriginDetails.h"
 #include "OriginPivotComponentDetails.h"
 #include "OriginPivotComponent.h"
+#include "OriginPivotViewportMode.h"
+#include "EditorModeRegistry.h"
 #include "OriginHierarchy.h"
 #include "OriginHierarchyFeedback.h"
 #include "SceneOutlinerModule.h"
@@ -82,6 +85,11 @@ public:
         AddBrush(TEXT("Origin.Parent"),TEXT("child-select-left.svg"),FVector2D(8,16));
         AddBrush(TEXT("Origin.Siblings"),TEXT("child-select-right.svg"),FVector2D(8,16));
         FSlateStyleRegistry::RegisterSlateStyle(*Style);
+        FEditorModeRegistry::Get().RegisterMode<FOriginPivotViewportMode>(
+            FOriginPivotViewportMode::ModeID,
+            FText::FromString(TEXT("Origin Pivot Edit")),
+            FSlateIcon(FAppStyle::GetAppStyleSetName(), TEXT("LevelEditor.Tabs.Modes")),
+            false, 900);
         FOriginCommands::Register();
         Commands = MakeShared<FUICommandList>();
         Commands->MapAction(FOriginCommands::Get().Create,FExecuteAction::CreateStatic(&Origin::CreateAnchor),
@@ -118,6 +126,7 @@ public:
             HierarchyFeedbackProcessor = OriginHierarchyFeedback::CreateInputProcessor();
             FSlateApplication::Get().RegisterInputPreProcessor(HierarchyFeedbackProcessor);
         }
+        OriginPerformance::Initialize();
         bRegistered = true;
     }
     virtual void ShutdownModule() override
@@ -129,6 +138,9 @@ public:
             FSlateApplication::Get().UnregisterInputPreProcessor(HierarchyFeedbackProcessor);
         HierarchyFeedbackProcessor.Reset();
         OriginHierarchyFeedback::Shutdown();
+        OriginPerformance::Shutdown();
+        FOriginPivotViewportMode::Shutdown();
+        FEditorModeRegistry::Get().UnregisterMode(FOriginPivotViewportMode::ModeID);
         if (auto* Outliner = FModuleManager::GetModulePtr<FSceneOutlinerModule>(TEXT("SceneOutliner")))
             Outliner->OnCreateActorBrowserColumns().Remove(Columns);
         if (auto* Properties = FModuleManager::GetModulePtr<FPropertyEditorModule>(TEXT("PropertyEditor")))

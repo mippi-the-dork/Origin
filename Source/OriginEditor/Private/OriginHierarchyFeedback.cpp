@@ -1,6 +1,7 @@
 // Copyright Mippithedork 2026, Inc. All Rights Reserved.
-
 #include "OriginHierarchyFeedback.h"
+
+#include "OriginPerformance.h"
 
 #include "ActorFolderTreeItem.h"
 #include "Framework/Application/IInputProcessor.h"
@@ -19,6 +20,7 @@
 #include "SceneOutlinerStandaloneTypes.h"
 #include "Widgets/Views/STableRow.h"
 #include "SSceneOutliner.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 
 namespace OriginHierarchyFeedback
 {
@@ -269,6 +271,8 @@ namespace OriginHierarchyFeedback
             FSlateApplication& SlateApplication,
             const FPointerEvent& MouseEvent) override
         {
+            TRACE_CPUPROFILER_EVENT_SCOPE(Origin_HierarchyMouseFeedback);
+            ORIGIN_PERF_SCOPE(OutlinerMouseFeedback);
             const TSharedPtr<FDragDropOperation> Operation =
                 SlateApplication.GetDragDroppingContent();
             if (!Operation)

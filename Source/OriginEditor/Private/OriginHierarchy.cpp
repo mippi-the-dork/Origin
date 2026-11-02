@@ -1,6 +1,7 @@
 // Copyright Mippithedork 2026, Inc. All Rights Reserved.
-
 #include "OriginHierarchy.h"
+
+#include "OriginPerformance.h"
 #include "OriginOperations.h"
 #include "OriginHierarchyFeedback.h"
 #include "OriginOutlinerToolbar.h"
@@ -9,9 +10,11 @@
 #include "FolderTreeItem.h"
 #include "EditorActorFolders.h"
 #include "EngineUtils.h"
+#include "Engine/Engine.h"
 #include "Editor.h"
 #include "Selection.h"
 #include "Framework/Application/SlateApplication.h"
+#include "InputCoreTypes.h"
 #include "Widgets/SBoxPanel.h"
 #include "Widgets/Text/STextBlock.h"
 #include "Widgets/Views/SHeaderRow.h"
@@ -21,15 +24,42 @@
 #include "Widgets/Images/SImage.h"
 #include "Styling/AppStyle.h"
 #include "Styling/SlateStyleRegistry.h"
+#include "ProfilingDebugging/CpuProfilerTrace.h"
 
 FOriginHierarchy::FOriginHierarchy(ISceneOutliner& InOutliner)
     : Outliner(StaticCastSharedRef<SSceneOutliner>(InOutliner.AsShared()))
 {
     OriginHierarchyFeedback::RegisterOutliner(InOutliner);
     OriginOutlinerToolbar::Schedule(StaticCastSharedRef<SSceneOutliner>(InOutliner.AsShared()));
+    // Track hierarchy-only editor events. Do NOT listen to OnActorMoving or
+    // OnComponentTransformChanged: they fire every gizmo frame and are irrelevant
+    // to the hierarchy counts shown by Origin's Outliner column.
+    if (GEngine)
+    {
+        ActorAddedHandle = GEngine->OnLevelActorAdded().AddLambda([this](AActor*) { InvalidateStructure(); });
+        ActorDeletedHandle = GEngine->OnLevelActorDeleted().AddLambda([this](AActor*) { InvalidateStructure(); });
+        ActorAttachedHandle = GEngine->OnLevelActorAttached().AddLambda([this](AActor*, const AActor*) { InvalidateStructure(); });
+        ActorDetachedHandle = GEngine->OnLevelActorDetached().AddLambda([this](AActor*, const AActor*) { InvalidateStructure(); });
+        ActorFolderHandle = GEngine->OnLevelActorFolderChanged().AddLambda([this](const AActor*, FName) { InvalidateStructure(); });
+        ActorFoldersUpdatedHandle = GEngine->OnActorFoldersUpdatedEvent().AddLambda([this](ULevel*) { InvalidateStructure(); });
+    }
+}
+FOriginHierarchy::~FOriginHierarchy()
+{
+    if (GEngine)
+    {
+        GEngine->OnLevelActorAdded().Remove(ActorAddedHandle);
+        GEngine->OnLevelActorDeleted().Remove(ActorDeletedHandle);
+        GEngine->OnLevelActorAttached().Remove(ActorAttachedHandle);
+        GEngine->OnLevelActorDetached().Remove(ActorDetachedHandle);
+        GEngine->OnLevelActorFolderChanged().Remove(ActorFolderHandle);
+        GEngine->OnActorFoldersUpdatedEvent().Remove(ActorFoldersUpdatedHandle);
+    }
 }
 void FOriginHierarchy::Rebuild()
 {
+    TRACE_CPUPROFILER_EVENT_SCOPE(Origin_OutlinerRebuild);
+    ORIGIN_PERF_SCOPE(OutlinerRebuild);
     Graph.Reset(); Children.Reset(); DescendantCounts.Reset();
     UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
     if (!World || World->WorldType != EWorldType::Editor) return;
@@ -209,8 +239,20 @@ const TSharedRef<SWidget> FOriginHierarchy::ConstructRowWidget(FSceneOutlinerTre
 }
 void FOriginHierarchy::Tick(double Now, float)
 {
+    TRACE_CPUPROFILER_EVENT_SCOPE(Origin_OutlinerTick);
+    ORIGIN_PERF_SCOPE(OutlinerTick);
     if (Now < NextUpdate) return;
-    NextUpdate = Now + .5;
+    // Rebuild() walks every editor Actor and folder. Running that expensive
+    // Outliner scan during an ordinary viewport gizmo drag can make Actors
+    // with deep component hierarchies feel sluggish. Hierarchy counts do not
+    // need to change during a transform. Defer the scan until mouse release;
+    // do NOT advance NextUpdate so the refresh happens immediately afterward.
+    if (FSlateApplication::IsInitialized() &&
+        FSlateApplication::Get().GetPressedMouseButtons().Contains(EKeys::LeftMouseButton)) return;
+    // Counts refresh only after an actor/folder structure event or when the
+    // Outliner constructs a new row. Ordinary transform movement generates no
+    // hierarchy work. Actual button actions always rebuild on demand.
+    NextUpdate = TNumericLimits<double>::Max();
     Rows.RemoveAll([](const TWeakPtr<FRow>& R) { return !R.IsValid(); });
     if (Rows.IsEmpty()) return;
     Rebuild();

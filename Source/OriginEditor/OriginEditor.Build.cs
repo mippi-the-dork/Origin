@@ -8,7 +8,7 @@ public class OriginEditor : ModuleRules
         PCHUsage = PCHUsageMode.UseExplicitOrSharedPCHs;
         PrivateDependencyModuleNames.AddRange(new[] {
             "Core", "CoreUObject", "Engine", "Origin", "UnrealEd", "Slate", "SlateCore",
-            "InputCore", "LevelEditor", "SceneOutliner", "PropertyEditor", "ToolMenus",
+            "InputCore", "LevelEditor", "EditorFramework", "SceneOutliner", "PropertyEditor", "ToolMenus",
             "Projects", "AssetRegistry", "AssetTools", "DeveloperSettings"
         });
     }
