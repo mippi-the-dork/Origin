@@ -2,6 +2,7 @@
 #include "OriginPerformance.h"
 
 #include "OriginPivotComponent.h"
+#include "Engine/Blueprint.h"
 #include "Components/SceneComponent.h"
 #include "Containers/Ticker.h"
 #include "Editor.h"
@@ -39,6 +40,9 @@ namespace OriginPerformance
         {
             FString Label;
             FString ActorName;
+            FString ActorClass;
+            FString BlueprintAssetPath;
+            FString ConstructionScriptOnDrag;
             TWeakObjectPtr<AActor> SelectedActor;
             bool bAutoClassify = false;
             int32 SceneComponents = 0;
@@ -74,6 +78,17 @@ namespace OriginPerformance
             AActor* Actor = Selection ? Selection->GetTop<AActor>() : nullptr;
             if (!IsValid(Actor)) return;
             Report.ActorName = Actor->GetName();
+            Report.ActorClass = Actor->GetClass()->GetName();
+            if (const UBlueprint* Blueprint = UBlueprint::GetBlueprintFromClass(Actor->GetClass()))
+            {
+                Report.BlueprintAssetPath = Blueprint->GetPathName();
+                Report.ConstructionScriptOnDrag = Blueprint->bRunConstructionScriptOnDrag ? TEXT("Enabled") : TEXT("Disabled");
+            }
+            else
+            {
+                Report.BlueprintAssetPath = TEXT("<native class>");
+                Report.ConstructionScriptOnDrag = TEXT("Not applicable");
+            }
             Report.SelectedActor = Actor;
             TArray<USceneComponent*> Components;
             Actor->GetComponents<USceneComponent>(Components);
@@ -135,6 +150,8 @@ namespace OriginPerformance
                 UE_LOG(LogOriginPerf, Error, TEXT("Could not write performance CSV %s"), *Report.CSVPath);
             const FString TextPath = FPaths::ChangeExtension(Report.CSVPath, TEXT("txt"));
             FString Summary = SummaryString(Report) + TEXT("\n");
+            Summary += FString::Printf(TEXT("Actor class: %s\nBlueprint asset: %s\nRun Construction Script on Drag at capture start: %s\n"),
+                *Report.ActorClass, *Report.BlueprintAssetPath, *Report.ConstructionScriptOnDrag);
             if (Report.bAutoClassify)
             {
                 TArray<double> Idle, Moving;
@@ -217,7 +234,8 @@ namespace OriginPerformance
         bReceivedMovementEvent = false;
         for (double& V : FrameScopes) V = 0;
         bCapturing = true;
-        UE_LOG(LogOriginPerf, Display, TEXT("Started '%s'. Drag normally, then run Origin.Perf.Stop."), *Current.Label);
+        UE_LOG(LogOriginPerf, Display, TEXT("Started '%s'. Actor=%s, Blueprint=%s, Construction Script on Drag=%s. Drag normally, then run Origin.Perf.Stop."),
+            *Current.Label, *Current.ActorName, *Current.BlueprintAssetPath, *Current.ConstructionScriptOnDrag);
     }
     void StartAuto()
     {
@@ -257,6 +275,34 @@ namespace OriginPerformance
         const FReport& A = Completed[Completed.Num()-2];
         const FReport& B = Completed.Last();
         const double Ratio = A.FrameSummary.MeanMs > 0 ? B.FrameSummary.MeanMs/A.FrameSummary.MeanMs : 0;
+        UE_LOG(LogOriginPerf, Display, TEXT("COMPARE Blueprint: A=%s (CS on drag: %s) | B=%s (CS on drag: %s)"),
+            *A.BlueprintAssetPath, *A.ConstructionScriptOnDrag, *B.BlueprintAssetPath, *B.ConstructionScriptOnDrag);
+        if (A.BlueprintAssetPath != B.BlueprintAssetPath)
+            UE_LOG(LogOriginPerf, Warning, TEXT("COMPARE is across different Blueprint classes. Results are not a matched actor comparison."));
+        if (A.bAutoClassify && B.bAutoClassify)
+        {
+            TArray<double> AMoving, BMoving, AIdle, BIdle;
+            for (const FFrame& Frame : A.Frames)
+                (Frame.bMoving ? AMoving : AIdle).Add(Frame.FrameMs);
+            for (const FFrame& Frame : B.Frames)
+                (Frame.bMoving ? BMoving : BIdle).Add(Frame.FrameMs);
+            const FSummary ADrag = Summarize(AMoving);
+            const FSummary BDrag = Summarize(BMoving);
+            const FSummary ARest = Summarize(AIdle);
+            const FSummary BRest = Summarize(BIdle);
+            UE_LOG(LogOriginPerf, Display, TEXT("COMPARE auto Moving: %d -> %d frames | mean %.2f -> %.2f ms (%.2fx) | P95 %.2f -> %.2f ms"),
+                ADrag.Count, BDrag.Count, ADrag.MeanMs, BDrag.MeanMs,
+                ADrag.MeanMs > 0.0 ? BDrag.MeanMs / ADrag.MeanMs : 0.0,
+                ADrag.P95Ms, BDrag.P95Ms);
+            UE_LOG(LogOriginPerf, Display, TEXT("COMPARE auto Idle: %d -> %d frames | mean %.2f -> %.2f ms | P95 %.2f -> %.2f ms"),
+                ARest.Count, BRest.Count, ARest.MeanMs, BRest.MeanMs,
+                ARest.P95Ms, BRest.P95Ms);
+            if (ADrag.Count && BDrag.Count && ARest.Count && BRest.Count)
+                UE_LOG(LogOriginPerf, Display, TEXT("COMPARE incremental drag penalty (Moving mean - Idle mean): %.2f -> %.2f ms"),
+                    ADrag.MeanMs - ARest.MeanMs, BDrag.MeanMs - BRest.MeanMs);
+            if (!ADrag.Count || !BDrag.Count)
+                UE_LOG(LogOriginPerf, Warning, TEXT("COMPARE missing moving frames in at least one capture; no trustworthy live-drag comparison."));
+        }
         UE_LOG(LogOriginPerf, Display, TEXT("COMPARE: %s -> %s | mean frame %.2f -> %.2f ms | P95 %.2f -> %.2f ms | ratio %.2fx | frame-time increase %.2f ms"),
             *A.Label, *B.Label, A.FrameSummary.MeanMs, B.FrameSummary.MeanMs,
             A.FrameSummary.P95Ms, B.FrameSummary.P95Ms, Ratio,
@@ -300,3 +346,19 @@ static FAutoConsoleCommand GOriginPerfCompare(
 static FAutoConsoleCommand GOriginPerfAuto(
     TEXT("Origin.Perf.Auto"), TEXT("Automatically split idle/moving frames for the selected Actor. Select Actor first; then Origin.Perf.Auto, drag, Origin.Perf.Stop."),
     FConsoleCommandDelegate::CreateStatic(&OriginPerformance::StartAuto));
+
+// Diagnostic guidance only. Engine-wide Trace.File/Trace.Stop are intentionally
+// left under user control; Origin must not stop someone else's active trace.
+static FAutoConsoleCommand GOriginPerfTraceGuide(
+    TEXT("Origin.Perf.TraceGuide"), TEXT("Print a focused UE 5.8 Insights capture procedure for Blueprint construction drag costs."),
+    FConsoleCommandDelegate::CreateLambda([]()
+    {
+        UE_LOG(LogOriginPerf, Display, TEXT("For the selected Blueprint Actor, record a SHORT native Unreal Insights trace:"));
+        UE_LOG(LogOriginPerf, Display, TEXT("  Trace.File Origin_BPDrag.utrace cpu,frame,bookmark,log"));
+        UE_LOG(LogOriginPerf, Display, TEXT("  Trace.Bookmark Origin_BPDrag_Begin"));
+        UE_LOG(LogOriginPerf, Display, TEXT("  [Drag the Actor with Construction Script on Drag enabled for 3-5 seconds]"));
+        UE_LOG(LogOriginPerf, Display, TEXT("  Trace.Bookmark Origin_BPDrag_End"));
+        UE_LOG(LogOriginPerf, Display, TEXT("  Trace.Stop"));
+        UE_LOG(LogOriginPerf, Display, TEXT("Open Project/Saved/Profiling/Origin_BPDrag.utrace in Unreal Insights. On the Game Thread inspect AActor::RerunConstructionScripts, AActor::ExecuteConstruction, component register/reregister, editor movement callbacks and Slate. Engine trace timing is required to attribute those costs; Origin's frame CSV alone cannot."));
+        UE_LOG(LogOriginPerf, Display, TEXT("Do not run Trace.File if another trace is active; use Trace.Status to check."));
+    }));

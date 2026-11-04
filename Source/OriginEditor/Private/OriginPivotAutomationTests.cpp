@@ -481,3 +481,111 @@ bool FOriginViewportDisplayedDeltaRegression::RunTest(const FString& Parameters)
 #undef ORIGIN_TEST
 #endif // WITH_DEV_AUTOMATION_TESTS
 
+
+#if WITH_DEV_AUTOMATION_TESTS
+#include "OriginPivotSnapMath.h"
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FOriginSlotSwitchPreservesAssemblyTest,
+    "Origin.Runtime.Slots.ActivatePreservesAssembly",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FOriginSlotSwitchPreservesAssemblyTest::RunTest(const FString& Parameters)
+{
+    OriginAutomation::FFixture F;
+    if (!F.Initialize(*this)) return false;
+    USceneComponent* Child = F.AddComponent<USceneComponent>(F.Owner, TEXT("SlotChild"),
+        F.Pivot, FVector(150.0, -30.0, 20.0));
+    if (!TestNotNull(TEXT("Child"), Child)) return false;
+    FText Reason;
+    TestTrue(TEXT("Capture Default"), F.Pivot->CaptureOriginPivotSlot(TEXT("Default"), Reason));
+    const FTransform OriginalPivot = F.Pivot->GetComponentTransform();
+    FTransform DifferentPivot = OriginalPivot;
+    DifferentPivot.AddToTranslation(FVector(100.0, 70.0, 50.0));
+    DifferentPivot.SetRotation(FRotator(0, 65, 0).Quaternion());
+    TestTrue(TEXT("Move for second pose"), F.Pivot->SetOriginPivotWorldTransform(DifferentPivot, Reason)
+        == EOriginPivotResult::Success);
+    TestTrue(TEXT("Create alternate pose"), F.Pivot->CreateOriginPivotSlot(TEXT("Other"), Reason));
+    const FTransform ChildBeforeSwitch = Child->GetComponentTransform();
+    TestTrue(TEXT("Activate Default"), F.Pivot->ActivateOriginPivotSlot(TEXT("Default"), Reason)
+        == EOriginPivotResult::Success);
+    TestTrue(TEXT("Restored original pivot"), OriginAutomation::SameTransform(OriginalPivot, F.Pivot->GetComponentTransform()));
+    TestTrue(TEXT("Child remained stationary"), OriginAutomation::SameTransform(ChildBeforeSwitch, Child->GetComponentTransform()));
+    TestEqual(TEXT("Active name"), F.Pivot->OriginPivotConfiguration.ActiveSlotName, FName(TEXT("Default")));
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FOriginSlotRelativeParentTest,
+    "Origin.Runtime.Slots.RelativeToMovedParent",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FOriginSlotRelativeParentTest::RunTest(const FString& Parameters)
+{
+    OriginAutomation::FFixture F;
+    if (!F.Initialize(*this)) return false;
+    USceneComponent* Child = F.AddComponent<USceneComponent>(F.Owner, TEXT("MovingChild"),
+        F.Pivot, FVector(-20.0, 40.0, 50.0));
+    if (!TestNotNull(TEXT("Child"), Child)) return false;
+    FText Reason;
+    TestTrue(TEXT("Capture Default relative pose"), F.Pivot->CaptureOriginPivotSlot(TEXT("Default"), Reason));
+    FTransform StoredPose;
+    TestTrue(TEXT("Can read captured pose"), F.Pivot->GetOriginPivotSlotPose(TEXT("Default"), StoredPose));
+    F.Root->SetWorldLocationAndRotation(FVector(300, -50, 200), FRotator(0, 90, 0));
+    FTransform Offset = F.Pivot->GetComponentTransform();
+    Offset.AddToTranslation(FVector(0, 60, 0));
+    TestTrue(TEXT("Move pivot before reactivating"), F.Pivot->SetOriginPivotWorldTransform(Offset, Reason)
+        == EOriginPivotResult::Success);
+    const FTransform ChildBeforeSwitch = Child->GetComponentTransform();
+    TestTrue(TEXT("Activate slot after moving whole assembly"), F.Pivot->ActivateOriginPivotSlot(TEXT("Default"), Reason)
+        == EOriginPivotResult::Success);
+    TestTrue(TEXT("Pose follows the parent"), OriginAutomation::SameTransform(
+        StoredPose * F.Root->GetComponentTransform(), F.Pivot->GetComponentTransform()));
+    TestTrue(TEXT("Child stays at the current world transform"), OriginAutomation::SameTransform(
+        ChildBeforeSwitch, Child->GetComponentTransform()));
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FOriginSlotAtomicRejectionTest,
+    "Origin.Runtime.Slots.RejectedActivationIsAtomic",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FOriginSlotAtomicRejectionTest::RunTest(const FString& Parameters)
+{
+    OriginAutomation::FFixture F;
+    if (!F.Initialize(*this)) return false;
+    FText Reason;
+    TestTrue(TEXT("Capture invalid candidate fixture slot"), F.Pivot->CreateOriginPivotSlot(TEXT("Other"), Reason));
+    TestTrue(TEXT("Make Default active before rejected switch"),
+        F.Pivot->CaptureOriginPivotSlot(TEXT("Default"), Reason));
+    FOriginPivotSlot* Other = F.Pivot->OriginPivotConfiguration.FindSlot(TEXT("Other"));
+    if (!TestNotNull(TEXT("Other slot"), Other)) return false;
+    Other->SavedRelativeTransform.SetScale3D(FVector(2, 1, 1));
+    const FTransform Before = F.Pivot->GetComponentTransform();
+    const FName ActiveBefore = F.Pivot->OriginPivotConfiguration.ActiveSlotName;
+    TestTrue(TEXT("Unsupported scale rejected"), F.Pivot->ActivateOriginPivotSlot(TEXT("Other"), Reason)
+        == EOriginPivotResult::UnsupportedScale);
+    TestTrue(TEXT("Rejected activation did not move component"), OriginAutomation::SameTransform(
+        Before, F.Pivot->GetComponentTransform()));
+    TestEqual(TEXT("Rejected activation did not change active name"),
+        F.Pivot->OriginPivotConfiguration.ActiveSlotName, ActiveBefore);
+    TestFalse(TEXT("Duplicate slot cannot be created"), F.Pivot->CreateOriginPivotSlot(TEXT("Other"), Reason));
+    TestFalse(TEXT("Default active slot cannot be deleted"),
+        F.Pivot->DeleteOriginPivotSlot(TEXT("Default"), Reason));
+    TestTrue(TEXT("Inactive invalid-pose slot can be deleted without activating it"),
+        F.Pivot->DeleteOriginPivotSlot(TEXT("Other"), Reason));
+    return true;
+}
+
+IMPLEMENT_SIMPLE_AUTOMATION_TEST(FOriginSlotSnapCenterMathTest,
+    "Origin.Runtime.Slots.SnapAverageMath",
+    EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
+bool FOriginSlotSnapCenterMathTest::RunTest(const FString& Parameters)
+{
+    TArray<FTransform> Children;
+    Children.Add(FTransform(FRotator::ZeroRotator, FVector(100, 0, 0)));
+    Children.Add(FTransform(FRotator::ZeroRotator, FVector(-100, 0, 0)));
+    const FTransform Pivot(FRotator(0, 90, 0), FVector(50, 60, 70));
+    FVector Center(123, 456, 789);
+    TestTrue(TEXT("Centered child origins valid"), FOriginPivotSnapMath::AverageChildOrigins(Pivot, Children, Center));
+    TestTrue(TEXT("Rotation and translation applied to child origins"), Center.Equals(FVector(50, 60, 70), 1.e-4));
+    Children.Reset();
+    TestFalse(TEXT("Zero children rejected"), FOriginPivotSnapMath::AverageChildOrigins(Pivot, Children, Center));
+    return true;
+}
+#endif

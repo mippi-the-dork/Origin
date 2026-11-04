@@ -17,8 +17,8 @@ DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOriginPivotChangedSignature,
  * Ordinary movement uses standard SceneComponent transform nodes; special pivot
  * editing keeps the attached assembly stationary instead of moving it.
  *
- * Alpha 3: editor numeric authoring for placed instances; slot activation,
- * viewport gizmos and replicated pivot-authoring state remain later phases.
+ * Slot poses are stored in parent-relative coordinates. Normal scene-component
+ * movement never writes slots; use Capture to explicitly save an authored pose.
  */
 UCLASS(ClassGroup=(Origin), BlueprintType, Blueprintable,
     meta=(BlueprintSpawnableComponent, DisplayName="Origin Pivot"))
@@ -29,13 +29,48 @@ class ORIGIN_API UOriginPivotComponent : public USceneComponent
 public:
     UOriginPivotComponent();
 
-    /** Shared runtime data shape; slot authoring/activation is not enabled in Alpha 2. */
+    /** Persistent named pivot definitions and captured parent-relative poses. */
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Origin|Pivot|Slots")
     FOriginPivotConfiguration OriginPivotConfiguration;
 
     /** Read a stored pivot definition without changing the component transform. */
     UFUNCTION(BlueprintPure, Category="Origin|Pivot|Slots", meta=(DisplayName="Get Origin Pivot Slot Definition"))
     bool GetOriginPivotSlotDefinition(FName SlotName, FOriginPivotDefinition& OutDefinition) const;
+
+    /** Save the current parent-relative pivot pose to a new named slot. */
+    UFUNCTION(BlueprintCallable, Category="Origin|Pivot|Slots", meta=(DisplayName="Create Origin Pivot Slot"))
+    bool CreateOriginPivotSlot(FName SlotName, FText& FailureReason);
+
+    /** Overwrite an existing slot with the current parent-relative pivot pose. */
+    UFUNCTION(BlueprintCallable, Category="Origin|Pivot|Slots", meta=(DisplayName="Capture Origin Pivot Slot"))
+    bool CaptureOriginPivotSlot(FName SlotName, FText& FailureReason);
+
+    /** Duplicate an existing slot definition and pose under a new name (without activating it). */
+    UFUNCTION(BlueprintCallable, Category="Origin|Pivot|Slots", meta=(DisplayName="Duplicate Origin Pivot Slot"))
+    bool DuplicateOriginPivotSlot(FName SourceName, FName NewName, FText& FailureReason);
+
+    /** Rename a non-Default slot, updating ActiveSlotName if necessary. */
+    UFUNCTION(BlueprintCallable, Category="Origin|Pivot|Slots", meta=(DisplayName="Rename Origin Pivot Slot"))
+    bool RenameOriginPivotSlot(FName OldName, FName NewName, FText& FailureReason);
+
+    UFUNCTION(BlueprintPure, Category="Origin|Pivot|Slots", meta=(DisplayName="Get Origin Pivot Slot Names"))
+    void GetOriginPivotSlotNames(TArray<FName>& OutNames) const;
+
+    /** Delete an inactive slot. The required Default slot cannot be deleted. */
+    UFUNCTION(BlueprintCallable, Category="Origin|Pivot|Slots", meta=(DisplayName="Delete Origin Pivot Slot"))
+    bool DeleteOriginPivotSlot(FName SlotName, FText& FailureReason);
+
+    /** Query an explicitly captured slot pose (including whether it exists). */
+    UFUNCTION(BlueprintPure, Category="Origin|Pivot|Slots", meta=(DisplayName="Get Origin Pivot Slot Pose"))
+    bool GetOriginPivotSlotPose(FName SlotName, FTransform& OutRelativePose) const;
+
+    /**
+     * Switch to a captured slot while preserving the attached assembly in world
+     * space. Runtime instances only; use the editor's authored Blueprint action
+     * for Blueprint component templates. Invalid attempts change nothing.
+     */
+    UFUNCTION(BlueprintCallable, Category="Origin|Pivot|Slots", meta=(DisplayName="Activate Origin Pivot Slot"))
+    EOriginPivotResult ActivateOriginPivotSlot(FName SlotName, FText& FailureReason);
 
     /** Fires only for successful Origin pivot edits, not ordinary SceneComponent movement. */
     UPROPERTY(BlueprintAssignable, Category="Origin|Pivot")

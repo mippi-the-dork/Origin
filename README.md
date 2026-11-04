@@ -1,5 +1,5 @@
-> **Origin 2.0.0-alpha.1 development preview**  
-> This package retains the complete Origin 1.0.6 editor functionality and adds the initial runtime **Origin Pivot Component** and Blueprint callable pivot-preserving edit operation. This is not the completed 2.0 release. UE 5.8.3 compilation and runtime behavior still require verification. Existing Anchors have not yet been migrated or refactored. The 1.x descriptions below document the stable editor features.
+> **Origin 2.0.0-alpha.5.1 development preview**
+> Alpha 5.1 adds **Blueprint SCS hierarchy authoring** (adopt a sibling, promote a child, insert a new pivot above a child), with preflight transform preservation and editor Undo transactions. See [Alpha 5.1 hierarchy guide](Doc/ALPHA_5_1_HIERARCHY.md). Alpha 5 also added **named local-space pivot slots** (create/capture/activate/duplicate/rename/delete) and **pivot snap/align** to direct child origins and parent transforms, in both Level and authored Blueprint component Details. Switching slots preserves attached content. This is an unreleased source preview and must be compiled/tested in UE 5.8.3. See [Alpha 5 guide](Doc/ALPHA_5_NAMED_SLOTS.md), [Automation tests](Doc/AUTOMATED_TESTS.md), [Runtime component](Doc/BLUEPRINT_RUNTIME_COMPONENT.md), and [2.0 roadmap](Doc/ROADMAP_2_0.md). The Alpha 4.2 Blueprint viewport fix was manually validated; the performance regression was reproduced without Origin using ordinary Scene Components.
 
 # Origin
 
@@ -1353,3 +1353,17 @@ The plugin was built around a simple problem:
 > A useful hierarchy needs a useful place to manipulate it from.
 
 Origin gives Actor assemblies a flexible pivot without requiring their visible contents to move just to change where that pivot lives.
+
+### Alpha 4.2: Blueprint reconstruction and live authoring diagnostics
+
+This development pass adds a Blueprint widget-axis-independent tracking fallback, drag-start child preview compensation, and five native Automation Framework tests for Blueprint reconstruction, preview preservation, and authored template persistence. See `Doc/ALPHA_4_2_RECONSTRUCTION_1.md` for specific test commands and limitations. Origin does not automatically change **Run Construction Script on Drag** in user Blueprints.
+
+
+### Alpha 4.2 Reconstruction Pass 1 Hotfix 1
+
+Compilation corrections to Blueprint preview child reconciliation and the native transient-Blueprint fixture assertion. See `Doc/ALPHA_4_2_RECONSTRUCTION_1_HOTFIX_1.md`.
+
+
+### Alpha 4.2 reconstruction profiling pass 2
+
+For the balanced synthetic Blueprint reconstruction benchmark and non-destructive selected-Actor Construction Script on/off profiling workflow, see [`Doc/ALPHA_4_2_RECONSTRUCTION_2.md`](Doc/ALPHA_4_2_RECONSTRUCTION_2.md).

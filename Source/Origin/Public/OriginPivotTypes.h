@@ -63,7 +63,12 @@ struct ORIGIN_API FOriginPivotDefinition
     bool bLocalOffset = false;
 };
 
-/** A named pivot configuration. Only the Default slot is populated in Alpha 2. */
+/**
+ * Named authoring pose in the component parent's local space.
+ * Existing v1/Alpha 2 slots have bHasSavedRelativeTransform=false and remain
+ * untouched until the user explicitly captures a pose. Never guess a migrated
+ * slot's pose or reposition content during PostLoad.
+ */
 USTRUCT(BlueprintType)
 struct ORIGIN_API FOriginPivotSlot
 {
@@ -74,19 +79,27 @@ struct ORIGIN_API FOriginPivotSlot
 
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Origin|Pivot")
     FOriginPivotDefinition Definition;
+
+    /** Whether this slot has an explicitly captured transform (legacy slots do not). */
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Origin|Pivot")
+    bool bHasSavedRelativeTransform = false;
+
+    /** Pivot pose relative to its immediate attachment parent, not world space. */
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Origin|Pivot")
+    FTransform SavedRelativeTransform = FTransform::Identity;
 };
 
 /**
  * Versioned, runtime-serializable pivot data shared by Anchors and Components.
- * Slots are deliberately read-only in Alpha 2 until authoring/activation can
- * update actual transforms atomically and safely.
+ * Legacy definitions remain unmodified; named local-space transform snapshots
+ * can be explicitly saved and activated without modifying the entire assembly.
  */
 USTRUCT(BlueprintType)
 struct ORIGIN_API FOriginPivotConfiguration
 {
     GENERATED_BODY()
 
-    // 0: no v2 data / legacy source; 1: position definitions imported.
+    // 0: legacy source; 1: position definitions imported; 2: local-pose slots available.
     UPROPERTY()
     int32 SchemaVersion = 0;
 

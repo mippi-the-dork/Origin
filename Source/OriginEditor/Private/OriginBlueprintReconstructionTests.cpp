@@ -1,6 +1,7 @@
 // Copyright Mippithedork 2026, Inc. All Rights Reserved.
 // Origin-only Unreal native Automation Framework tests. No project assets are modified.
 #include "OriginBlueprintPivotEdit.h"
+#include "OriginPerformance.h"
 
 #if WITH_DEV_AUTOMATION_TESTS
 #include "OriginPivotViewportMode.h"
@@ -17,6 +18,10 @@
 #include "UObject/UObjectGlobals.h"
 #include "UObject/StrongObjectPtr.h"
 #include "HAL/PlatformTime.h"
+#include "Misc/DateTime.h"
+#include "Misc/Paths.h"
+#include "Misc/FileHelper.h"
+#include "HAL/FileManager.h"
 
 namespace
 {
@@ -65,13 +70,24 @@ namespace
         }
     };
 
-    double MeasureReconstruction(AActor* Actor, int32 Iterations)
+    // A single per-call figure is too sensitive to OS scheduling, CPU clock and
+    // Blueprint/object allocator warmup. Each sample is an average of a short
+    // batch; the three variants run in a rotating order every round.
+    double MeasureReconstructionBatch(AActor* Actor, int32 Iterations)
     {
-        for (int32 Index = 0; Index < 3; ++Index) Actor->RerunConstructionScripts();
-        const double Start = FPlatformTime::Seconds();
-        for (int32 Index = 0; Index < Iterations; ++Index) Actor->RerunConstructionScripts();
-        return (FPlatformTime::Seconds() - Start) * 1000.0 / Iterations;
+        const double Started = FPlatformTime::Seconds();
+        for (int32 Index = 0; Index < Iterations; ++Index)
+            Actor->RerunConstructionScripts();
+        return (FPlatformTime::Seconds() - Started) * 1000.0 / Iterations;
     }
+    constexpr int32 ReconstructionVariants = 3;
+    constexpr int32 ReconstructionRounds = 18;
+    constexpr int32 ReconstructionCallsPerRound = 24;
+    int32 VariantForPosition(int32 Round, int32 Position)
+    {
+        return (Round + Position) % ReconstructionVariants;
+    }
+
 }
 
 #define ORIGIN_RECONSTRUCTION_TEST(Class, Path) IMPLEMENT_SIMPLE_AUTOMATION_TEST(Class, Path, EAutomationTestFlags::EditorContext | EAutomationTestFlags::EngineFilter)
@@ -106,33 +122,106 @@ bool FOriginBlueprintReconstructionComparison::RunTest(const FString& Parameters
     if (!TestTrue(TEXT("Create isolated world"), TestWorld.CreateTestWorld(EWorldType::Game))) return false;
     UWorld* World = TestWorld.GetTestWorld();
     if (!TestNotNull(TEXT("Isolated test world"), World)) return false;
-    constexpr int32 Iterations = 30;
-    double Ms[3] = {0.0, 0.0, 0.0};
-    for (int32 Count = 0; Count <= 2; ++Count)
+
+    // Build and spawn all variants before timing so Blueprint compilation and
+    // first-spawn costs cannot leak into one measured variant.
+    FTransientBlueprintFixture Fixtures[ReconstructionVariants];
+    AActor* Actors[ReconstructionVariants] = {};
+    TArray<double> Samples[ReconstructionVariants];
+    for (int32 Count = 0; Count < ReconstructionVariants; ++Count)
     {
-        FTransientBlueprintFixture Fixture;
-        if (!Fixture.Build(*this, Count)) return false;
-        UClass* Generated = Fixture.Blueprint->GeneratedClass;
+        if (!Fixtures[Count].Build(*this, Count)) return false;
+        UClass* Generated = Fixtures[Count].Blueprint->GeneratedClass.Get();
         if (!TestNotNull(TEXT("Generated Blueprint class"), Generated)) return false;
         FActorSpawnParameters Params;
         Params.ObjectFlags |= RF_Transient;
         Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-        AActor* Instance = World->SpawnActor<AActor>(Generated, FVector::ZeroVector,
+        Actors[Count] = World->SpawnActor<AActor>(Generated, FVector(Count * 1000., 0., 0.),
             FRotator::ZeroRotator, Params);
-        if (!TestNotNull(TEXT("Spawn generated Blueprint Actor"), Instance)) return false;
+        if (!TestNotNull(TEXT("Spawn generated Blueprint Actor"), Actors[Count])) return false;
         TArray<UOriginPivotComponent*> Pivots;
-        Instance->GetComponents<UOriginPivotComponent>(Pivots);
-        TestEqual(TEXT("Correct number of Origin pivots in generated Actor"), Pivots.Num(), Count);
-        if (Pivots.Num() != Count) return false;
-        Ms[Count] = MeasureReconstruction(Instance, Iterations);
-        if (!TestTrue(TEXT("Reconstruction measurement is finite and nonnegative"),
-                FMath::IsFinite(Ms[Count]) && Ms[Count] >= 0.0)) return false;
-        World->DestroyActor(Instance);
+        Actors[Count]->GetComponents<UOriginPivotComponent>(Pivots);
+        if (!TestEqual(TEXT("Correct number of pivots in generated actor"), Pivots.Num(), Count)) return false;
+        TArray<USceneComponent*> Scenes;
+        Actors[Count]->GetComponents<USceneComponent>(Scenes);
+        if (!TestEqual(TEXT("Eight equivalent scene component nodes"), Scenes.Num(), 8)) return false;
+        for (int32 Warmup = 0; Warmup < 10; ++Warmup)
+            Actors[Count]->RerunConstructionScripts();
+        Samples[Count].Reserve(ReconstructionRounds);
     }
-    AddInfo(FString::Printf(TEXT("Origin Blueprint reconstruction: same 8-node SCS hierarchy, %d RerunConstructionScripts per case. Native=%.4f ms, 1 Pivot=%.4f ms (%.2fx), 2 Pivots=%.4f ms (%.2fx). CPU-only isolated synthetic measurement, NOT viewport FPS, Blueprint user Construction Script graph, or rendering."),
-        Iterations, Ms[0], Ms[1], Ms[0] > 0.0 ? Ms[1]/Ms[0] : 0.0,
-        Ms[2], Ms[0] > 0.0 ? Ms[2]/Ms[0] : 0.0));
-    return true; // timings are diagnostics, not a brittle performance threshold
+
+    FString CSV = TEXT("round,position,origin_pivots,reruns,ms_per_rerun\n");
+    for (int32 Round = 0; Round < ReconstructionRounds; ++Round)
+    {
+        for (int32 Position = 0; Position < ReconstructionVariants; ++Position)
+        {
+            const int32 Variant = VariantForPosition(Round, Position);
+            const double Ms = MeasureReconstructionBatch(Actors[Variant], ReconstructionCallsPerRound);
+            if (!TestTrue(TEXT("Finite positive batched reconstruction duration"),
+                FMath::IsFinite(Ms) && Ms > 0.0)) return false;
+            Samples[Variant].Add(Ms);
+            CSV += FString::Printf(TEXT("%d,%d,%d,%d,%.8f\n"),
+                Round, Position, Variant, ReconstructionCallsPerRound, Ms);
+        }
+    }
+
+    OriginPerformance::FSummary Stats[ReconstructionVariants];
+    for (int32 Count = 0; Count < ReconstructionVariants; ++Count)
+    {
+        Stats[Count] = OriginPerformance::Summarize(Samples[Count]);
+        if (!TestEqual(TEXT("Every case has all balanced rounds"), Stats[Count].Count, ReconstructionRounds)) return false;
+        TArray<UOriginPivotComponent*> Pivots;
+        Actors[Count]->GetComponents<UOriginPivotComponent>(Pivots);
+        if (!TestEqual(TEXT("Repeated reconstruction retains Origin component count"), Pivots.Num(), Count)) return false;
+        TArray<USceneComponent*> Scenes;
+        Actors[Count]->GetComponents<USceneComponent>(Scenes);
+        if (!TestEqual(TEXT("Repeated reconstruction retains scene hierarchy size"), Scenes.Num(), 8)) return false;
+    }
+
+    AddInfo(FString::Printf(TEXT("Origin balanced Blueprint reconstruction: %d warmup, %d rounds x %d reruns = %d measured reruns per variant. NATIVE mean/median/P95=%.4f/%.4f/%.4f ms; ONE Pivot=%.4f/%.4f/%.4f ms (median %.2fx); TWO Pivots=%.4f/%.4f/%.4f ms (median %.2fx). Values are batch-averaged CPU-only synthetic measurements; NOT real viewport FPS or user-authored Construction Script graph."),
+        10, ReconstructionRounds, ReconstructionCallsPerRound,
+        ReconstructionRounds * ReconstructionCallsPerRound,
+        Stats[0].MeanMs, Stats[0].MedianMs, Stats[0].P95Ms,
+        Stats[1].MeanMs, Stats[1].MedianMs, Stats[1].P95Ms,
+        Stats[0].MedianMs > 0.0 ? Stats[1].MedianMs / Stats[0].MedianMs : 0.0,
+        Stats[2].MeanMs, Stats[2].MedianMs, Stats[2].P95Ms,
+        Stats[0].MedianMs > 0.0 ? Stats[2].MedianMs / Stats[0].MedianMs : 0.0));
+
+    const FString Folder = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("Origin"), TEXT("Diagnostics"));
+    IFileManager::Get().MakeDirectory(*Folder, true);
+    const FString Path = FPaths::Combine(Folder,
+        FString::Printf(TEXT("OriginReconstruction_Balanced_%s.csv"), *FDateTime::Now().ToString(TEXT("%Y%m%d_%H%M%S"))));
+    if (FFileHelper::SaveStringToFile(CSV, *Path))
+        AddInfo(FString::Printf(TEXT("Origin reconstruction batch CSV: %s"), *Path));
+    else
+        AddWarning(FString::Printf(TEXT("Could not save optional reconstruction CSV: %s"), *Path));
+
+    for (AActor* Actor : Actors)
+        World->DestroyActor(Actor);
+    return true; // Informational timing; never assert on an arbitrary speed ratio.
+}
+
+ORIGIN_RECONSTRUCTION_TEST(FOriginBlueprintBalancedOrderTest, "Origin.Performance.ConstructionScript.BalancedOrderContract")
+bool FOriginBlueprintBalancedOrderTest::RunTest(const FString& Parameters)
+{
+    int32 Positions[ReconstructionVariants][ReconstructionVariants] = {};
+    for (int32 Round = 0; Round < ReconstructionRounds; ++Round)
+    {
+        bool bSeen[ReconstructionVariants] = {};
+        for (int32 Position = 0; Position < ReconstructionVariants; ++Position)
+        {
+            const int32 Variant = VariantForPosition(Round, Position);
+            if (!TestTrue(TEXT("Variant index in range"), Variant >= 0 && Variant < ReconstructionVariants)) return false;
+            if (!TestFalse(TEXT("No variant occurs twice within a round"), bSeen[Variant])) return false;
+            bSeen[Variant] = true;
+            ++Positions[Variant][Position];
+        }
+    }
+    for (int32 Variant = 0; Variant < ReconstructionVariants; ++Variant)
+        for (int32 Position = 0; Position < ReconstructionVariants; ++Position)
+            TestEqual(TEXT("Every variant occupies every position equally often"),
+                Positions[Variant][Position], ReconstructionRounds / ReconstructionVariants);
+    return true;
 }
 
 ORIGIN_RECONSTRUCTION_TEST(FOriginBlueprintNativeDragAxisTest, "Origin.Editor.Blueprint.Viewport.NativeGizmoWithoutLegacyAxis")
