@@ -87,6 +87,14 @@ struct ORIGIN_API FOriginPivotSlot
     /** Pivot pose relative to its immediate attachment parent, not world space. */
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Origin|Pivot")
     FTransform SavedRelativeTransform = FTransform::Identity;
+
+    /** True when an unattached Anchor captured this pose against the level world frame. */
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Origin|Pivot")
+    bool bCapturedAtWorldRoot = false;
+
+    /** Socket frame used by an explicitly captured pose. NAME_None means component origin. */
+    UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Origin|Pivot")
+    FName CapturedSocketName = NAME_None;
 };
 
 /**

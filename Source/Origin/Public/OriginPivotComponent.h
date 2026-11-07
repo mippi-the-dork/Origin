@@ -8,9 +8,6 @@
 #include "OriginPivotTypes.h"
 #include "OriginPivotComponent.generated.h"
 
-DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOriginPivotChangedSignature,
-    FTransform, PreviousPivotWorldTransform, FTransform, NewPivotWorldTransform);
-
 /**
  * An authorable pivot for Blueprint component hierarchies and attached Actors.
  * Children are attached using standard Unreal SceneComponent attachment rules.
@@ -56,7 +53,7 @@ public:
     UFUNCTION(BlueprintPure, Category="Origin|Pivot|Slots", meta=(DisplayName="Get Origin Pivot Slot Names"))
     void GetOriginPivotSlotNames(TArray<FName>& OutNames) const;
 
-    /** Delete an inactive slot. The required Default slot cannot be deleted. */
+    /** Delete a named slot, including the active one; active falls back to Default without moving. Default cannot be deleted. */
     UFUNCTION(BlueprintCallable, Category="Origin|Pivot|Slots", meta=(DisplayName="Delete Origin Pivot Slot"))
     bool DeleteOriginPivotSlot(FName SlotName, FText& FailureReason);
 

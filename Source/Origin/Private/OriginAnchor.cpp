@@ -1,6 +1,7 @@
 // Copyright Mippithedork 2026, Inc. All Rights Reserved.
 
 #include "OriginAnchor.h"
+#include "OriginPivotSlots.h"
 #include "Components/SceneComponent.h"
 #if WITH_EDITOR
 #include "Components/BillboardComponent.h"
@@ -85,15 +86,118 @@ void AOriginAnchor::PostActorCreated()
     }
 }
 
-bool AOriginAnchor::GetOriginPivotSlotDefinition(
-    FName SlotName, FOriginPivotDefinition& OutDefinition) const
+bool AOriginAnchor::GetOriginPivotSlotDefinition(FName Name, FOriginPivotDefinition& Out) const
 {
-    if (const FOriginPivotSlot* Slot = OriginPivotConfiguration.FindSlot(SlotName))
+    return FOriginPivotSlots::Definition(OriginPivotConfiguration, Name, Out);
+}
+
+namespace
+{
+    bool AnchorPose(const AOriginAnchor* Anchor, FTransform& OutPose, bool& bWorldFrame)
     {
-        OutDefinition = Slot->Definition;
-        return true;
+        const USceneComponent* Root = Anchor ? Anchor->GetRootComponent() : nullptr;
+        if (!IsValid(Root) || Root->IsTemplate()) return false;
+        bWorldFrame = Root->GetAttachParent() == nullptr;
+        OutPose = bWorldFrame ? Root->GetComponentTransform() : Root->GetRelativeTransform();
+        return OutPose.IsValid() && !OutPose.ContainsNaN();
     }
-    return false;
+}
+
+bool AOriginAnchor::CreateOriginPivotSlot(FName Name, FText& Reason)
+{
+    FTransform Pose; bool bWorldFrame = false;
+    if (!AnchorPose(this, Pose, bWorldFrame))
+    { Reason = FText::FromString(TEXT("Origin Anchor requires a live root with a valid transform.")); return false; }
+    return FOriginPivotSlots::Create(OriginPivotConfiguration, Name, Pose, bWorldFrame,
+        GetRootComponent()->GetAttachSocketName(), Reason);
+}
+
+bool AOriginAnchor::CaptureOriginPivotSlot(FName Name, FText& Reason)
+{
+    FTransform Pose; bool bWorldFrame = false;
+    if (!AnchorPose(this, Pose, bWorldFrame))
+    { Reason = FText::FromString(TEXT("Origin Anchor requires a live root with a valid transform.")); return false; }
+    return FOriginPivotSlots::Capture(OriginPivotConfiguration, Name, Pose, bWorldFrame,
+        GetRootComponent()->GetAttachSocketName(), Reason);
+}
+
+bool AOriginAnchor::DuplicateOriginPivotSlot(FName Source, FName Name, FText& Reason)
+{
+    return FOriginPivotSlots::Duplicate(OriginPivotConfiguration, Source, Name, Reason);
+}
+
+bool AOriginAnchor::RenameOriginPivotSlot(FName OldName, FName NewName, FText& Reason)
+{
+    return FOriginPivotSlots::Rename(OriginPivotConfiguration, OldName, NewName, Reason);
+}
+
+void AOriginAnchor::GetOriginPivotSlotNames(TArray<FName>& Out) const
+{
+    FOriginPivotSlots::Names(OriginPivotConfiguration, Out);
+}
+
+bool AOriginAnchor::DeleteOriginPivotSlot(FName Name, FText& Reason)
+{
+    return FOriginPivotSlots::Delete(OriginPivotConfiguration, Name, Reason);
+}
+
+bool AOriginAnchor::GetOriginPivotSlotPose(FName Name, FTransform& Out) const
+{
+    return FOriginPivotSlots::Pose(OriginPivotConfiguration, Name, Out);
+}
+
+EOriginPivotResult AOriginAnchor::CanSetOriginPivotWorldTransform(const FTransform& Candidate, FText& Reason) const
+{
+    return FOriginPivotCore::ValidatePivotEdit(GetRootComponent(), Candidate, Reason);
+}
+
+EOriginPivotResult AOriginAnchor::SetOriginPivotWorldTransform(const FTransform& Candidate, FText& Reason)
+{
+    USceneComponent* Root = GetRootComponent();
+    if (!Root)
+    { Reason = FText::FromString(TEXT("Origin Anchor has no root component.")); return EOriginPivotResult::InvalidPivot; }
+    const FTransform Before = Root->GetComponentTransform();
+    const EOriginPivotResult Result = FOriginPivotCore::SetPivotWorldTransformPreservingChildren(Root, Candidate, Reason);
+    if (Result == EOriginPivotResult::Success)
+        OnOriginPivotChanged.Broadcast(Before, Root->GetComponentTransform());
+    return Result;
+}
+
+EOriginPivotResult AOriginAnchor::ActivateOriginPivotSlot(FName Name, FText& Reason)
+{
+    FTransform Pose; bool bWasWorld = false;
+    if (!FOriginPivotSlots::Pose(OriginPivotConfiguration, Name, Pose, &bWasWorld))
+    { Reason = FText::FromString(TEXT("This pivot slot is missing or has never captured a transform.")); return EOriginPivotResult::InvalidTransform; }
+    if (IsTemplate())
+    { Reason = FText::FromString(TEXT("Pivot slots cannot be activated on Actor templates.")); return EOriginPivotResult::InvalidPivot; }
+    const USceneComponent* Root = GetRootComponent();
+    if (!Root)
+    { Reason = FText::FromString(TEXT("Origin Anchor has no root component.")); return EOriginPivotResult::InvalidPivot; }
+    const USceneComponent* Parent = Root->GetAttachParent();
+    if (bWasWorld != (Parent == nullptr))
+    {
+        Reason = FText::FromString(TEXT("The Anchor attachment frame changed since capture. Recapture the slot in the current parent frame."));
+        return EOriginPivotResult::InvalidPivot;
+    }
+    const FName Socket = Root->GetAttachSocketName();
+    const FOriginPivotSlot* Slot = OriginPivotConfiguration.FindSlot(Name);
+    if (!Slot || Slot->CapturedSocketName != Socket ||
+        (Parent && !Socket.IsNone() && !Parent->DoesSocketExist(Socket)))
+    {
+        Reason = FText::FromString(TEXT("The Anchor attachment socket changed or is missing. Recapture the slot in the current attachment frame."));
+        return EOriginPivotResult::InvalidPivot;
+    }
+    const FTransform Candidate = Parent ? Pose * Parent->GetSocketTransform(Socket, RTS_World) : Pose;
+    const EOriginPivotResult Preflight = CanSetOriginPivotWorldTransform(Candidate, Reason);
+    if (Preflight != EOriginPivotResult::Success && Preflight != EOriginPivotResult::NoChange) return Preflight;
+    const EOriginPivotResult Result = Preflight == EOriginPivotResult::NoChange
+        ? Preflight : SetOriginPivotWorldTransform(Candidate, Reason);
+    if (Result == EOriginPivotResult::Success || Result == EOriginPivotResult::NoChange)
+    {
+        OriginPivotConfiguration.ActiveSlotName = Name;
+        Reason = FText::GetEmpty();
+    }
+    return Result;
 }
 
 #if WITH_EDITOR
@@ -120,7 +224,7 @@ void AOriginAnchor::SyncLegacyPivotToRuntimeDefinition()
     DefaultSlot->Definition.Offset = OriginPivotOffset;
     DefaultSlot->Definition.bLocalOffset = bLocalPivotOffset;
 #endif
-    OriginPivotConfiguration.SchemaVersion = 1;
+    OriginPivotConfiguration.SchemaVersion = FMath::Max(1, OriginPivotConfiguration.SchemaVersion);
     if (OriginPivotConfiguration.ActiveSlotName.IsNone())
     {
         OriginPivotConfiguration.ActiveSlotName = TEXT("Default");

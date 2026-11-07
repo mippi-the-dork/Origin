@@ -116,6 +116,9 @@ EOriginPivotResult FOriginPivotCore::ValidatePivotEdit(
     GatherDescendants(Pivot, Descendants);
     for (const USceneComponent* Child : Descendants)
     {
+        // Editor-only visualization (e.g. Anchor billboard) follows its pivot.
+        // It is not authored assembly geometry and must not block pivot editing.
+        if (Child->IsVisualizationComponent()) continue;
         if (!Child->IsRegistered())
         {
             return Reject(EOriginPivotResult::UnregisteredComponent,
@@ -158,7 +161,7 @@ EOriginPivotResult FOriginPivotCore::SetPivotWorldTransformPreservingChildren(
     DirectChildren.Reserve(DirectAttachedComponents.Num());
     for (USceneComponent* Child : DirectAttachedComponents)
     {
-        if (IsValid(Child))
+        if (IsValid(Child) && !Child->IsVisualizationComponent())
         {
             FComponentWorldSnapshot Snapshot;
             Snapshot.Component = Child;
@@ -175,6 +178,7 @@ EOriginPivotResult FOriginPivotCore::SetPivotWorldTransformPreservingChildren(
     DescendantSnapshots.Reserve(Descendants.Num());
     for (USceneComponent* Child : Descendants)
     {
+        if (!IsValid(Child) || Child->IsVisualizationComponent()) continue;
         FComponentWorldSnapshot Snapshot;
         Snapshot.Component = Child;
         Snapshot.WorldTransform = Child->GetComponentTransform();

@@ -5,6 +5,7 @@
 #include "CoreMinimal.h"
 #include "GameFramework/Actor.h"
 #include "OriginPivotTypes.h"
+#include "OriginPivotCore.h"
 #include "OriginAnchor.generated.h"
 
 /** A runtime transform parent. Pivot calculation and all UI live in OriginEditor. */
@@ -22,7 +23,35 @@ public:
     UFUNCTION(BlueprintPure, Category="Origin|Pivot|Slots", meta=(DisplayName="Get Origin Pivot Slot Definition"))
     bool GetOriginPivotSlotDefinition(FName SlotName, FOriginPivotDefinition& OutDefinition) const;
 
-    /** Read only in Alpha 2. Named slot editing and switching are later phases. */
+    /** Anchor and component slots use the same serialized data and naming rules. */
+    UFUNCTION(BlueprintCallable, Category="Origin|Pivot|Slots", meta=(DisplayName="Create Origin Pivot Slot"))
+    bool CreateOriginPivotSlot(FName SlotName, FText& FailureReason);
+    UFUNCTION(BlueprintCallable, Category="Origin|Pivot|Slots", meta=(DisplayName="Capture Origin Pivot Slot"))
+    bool CaptureOriginPivotSlot(FName SlotName, FText& FailureReason);
+    UFUNCTION(BlueprintCallable, Category="Origin|Pivot|Slots", meta=(DisplayName="Duplicate Origin Pivot Slot"))
+    bool DuplicateOriginPivotSlot(FName SourceName, FName NewName, FText& FailureReason);
+    UFUNCTION(BlueprintCallable, Category="Origin|Pivot|Slots", meta=(DisplayName="Rename Origin Pivot Slot"))
+    bool RenameOriginPivotSlot(FName OldName, FName NewName, FText& FailureReason);
+    UFUNCTION(BlueprintPure, Category="Origin|Pivot|Slots", meta=(DisplayName="Get Origin Pivot Slot Names"))
+    void GetOriginPivotSlotNames(TArray<FName>& OutNames) const;
+    UFUNCTION(BlueprintCallable, Category="Origin|Pivot|Slots", meta=(DisplayName="Delete Origin Pivot Slot"))
+    bool DeleteOriginPivotSlot(FName SlotName, FText& FailureReason);
+    /** Root-level Anchor captures are stored in world space; attached Anchors use the parent component's frame. */
+    UFUNCTION(BlueprintPure, Category="Origin|Pivot|Slots", meta=(DisplayName="Get Origin Pivot Slot Pose"))
+    bool GetOriginPivotSlotPose(FName SlotName, FTransform& OutRelativePose) const;
+    /** Requires a Movable, registered, non-physics assembly. Does not change attached geometry. */
+    UFUNCTION(BlueprintCallable, Category="Origin|Pivot|Slots", meta=(DisplayName="Activate Origin Pivot Slot"))
+    EOriginPivotResult ActivateOriginPivotSlot(FName SlotName, FText& FailureReason);
+
+    UPROPERTY(BlueprintAssignable, Category="Origin|Pivot")
+    FOriginPivotChangedSignature OnOriginPivotChanged;
+
+    UFUNCTION(BlueprintCallable, Category="Origin|Pivot", meta=(DisplayName="Set Origin Pivot (Preserve Children)"))
+    EOriginPivotResult SetOriginPivotWorldTransform(const FTransform& NewPivotWorldTransform, FText& FailureReason);
+    UFUNCTION(BlueprintCallable, Category="Origin|Pivot", meta=(DisplayName="Can Set Origin Pivot"))
+    EOriginPivotResult CanSetOriginPivotWorldTransform(const FTransform& NewPivotWorldTransform, FText& FailureReason) const;
+
+    /** Runtime-serializable named slot data shared with Origin Pivot components. */
     UPROPERTY(VisibleAnywhere, BlueprintReadOnly, Category="Origin|Pivot|Migration")
     FOriginPivotConfiguration OriginPivotConfiguration;
 

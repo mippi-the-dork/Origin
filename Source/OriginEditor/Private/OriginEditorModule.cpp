@@ -2,6 +2,7 @@
 
 #include "Modules/ModuleManager.h"
 #include "OriginOperations.h"
+#include "OriginActorAssemblyAuthoring.h"
 #include "OriginPerformance.h"
 #include "OriginDetails.h"
 #include "OriginPivotComponentDetails.h"
@@ -33,7 +34,7 @@ class FOriginCommands : public TCommands<FOriginCommands>
 {
 public:
     FOriginCommands() : TCommands<FOriginCommands>(TEXT("Origin"), NSLOCTEXT("Origin","Commands","Origin"), NAME_None, FAppStyle::GetAppStyleSetName()) {}
-    TSharedPtr<FUICommandInfo> Create, Convert;
+    TSharedPtr<FUICommandInfo> Create, Convert, InsertActorPivot, AdoptActors, PromoteActors, DetachActors;
     virtual void RegisterCommands() override
     {
 #define LOCTEXT_NAMESPACE "Origin"
@@ -41,6 +42,10 @@ public:
         // without replacing Unreal's grouping shortcut or another plugin's key.
         UI_COMMAND(Create,"Create Origin Anchor","Create an anchor above the selected actors, preserving their world transforms. With no actors selected, create an empty anchor at world origin.",EUserInterfaceActionType::Button,FInputChord());
         UI_COMMAND(Convert,"Convert Selected Origin Anchors","Replace selected anchors with native empty Actors while preserving the assembly.",EUserInterfaceActionType::Button,FInputChord());
+        UI_COMMAND(InsertActorPivot,"Insert Origin Anchor Above Actor","Insert an Origin Anchor between one selected Actor and its current attachment parent. Preserves parent socket and world transforms.",EUserInterfaceActionType::Button,FInputChord());
+        UI_COMMAND(AdoptActors,"Reparent Actors to Origin Anchor","Select exactly one Origin Anchor and one or more other Actors; make those Actors direct children of the Anchor while preserving world transforms.",EUserInterfaceActionType::Button,FInputChord());
+        UI_COMMAND(PromoteActors,"Promote Actors From Origin Anchor","Move selected direct children of one Origin Anchor to that Anchor's parent, keeping world transforms. The Anchor remains.",EUserInterfaceActionType::Button,FInputChord());
+        UI_COMMAND(DetachActors,"Detach Actors From Origin Anchor","Detach selected direct children of one Origin Anchor to the world root, keeping world transforms. The Anchor remains.",EUserInterfaceActionType::Button,FInputChord());
 #undef LOCTEXT_NAMESPACE
     }
 };
@@ -62,6 +67,10 @@ class FOriginEditorModule final : public IModuleInterface
             auto& Section = Menu->FindOrAddSection(TEXT("Origin"));
             Section.Label = FText::FromString(TEXT("Origin"));
             Section.AddMenuEntryWithCommandList(FOriginCommands::Get().Create,Commands);
+            Section.AddMenuEntryWithCommandList(FOriginCommands::Get().InsertActorPivot,Commands);
+            Section.AddMenuEntryWithCommandList(FOriginCommands::Get().AdoptActors,Commands);
+            Section.AddMenuEntryWithCommandList(FOriginCommands::Get().PromoteActors,Commands);
+            Section.AddMenuEntryWithCommandList(FOriginCommands::Get().DetachActors,Commands);
             Section.AddMenuEntryWithCommandList(FOriginCommands::Get().Convert,Commands);
         }
     }
@@ -99,6 +108,61 @@ public:
                 if (!GEditor || GEditor->PlayWorld) return false;
                 for (AActor* A : Origin::SelectedActors()) if (Cast<AOriginAnchor>(A)) return true;
                 return false;
+            }));
+        // Alpha 5.2 Actor assembly commands deliberately use Outliner selection rather
+        // than a Details-only target: a target Anchor and multiple Actors can be selected together.
+        auto SelectedForAdopt = []() {
+            TArray<AActor*> Selected = Origin::SelectedActors();
+            AOriginAnchor* Anchor = nullptr;
+            for (AActor* Actor : Selected) if (AOriginAnchor* Candidate = Cast<AOriginAnchor>(Actor))
+            {
+                if (Anchor) return TPair<AOriginAnchor*, TArray<AActor*>>(nullptr, TArray<AActor*>());
+                Anchor = Candidate;
+            }
+            if (!Anchor) return TPair<AOriginAnchor*, TArray<AActor*>>(nullptr, TArray<AActor*>());
+            Selected.Remove(Anchor);
+            return TPair<AOriginAnchor*, TArray<AActor*>>(Anchor, MoveTemp(Selected));
+        };
+        Commands->MapAction(FOriginCommands::Get().InsertActorPivot,
+            FExecuteAction::CreateLambda([] {
+                const TArray<AActor*> Selected = Origin::SelectedActors();
+                FText Reason;
+                AOriginAnchor* NewAnchor = nullptr;
+                if (Selected.Num() != 1 || !OriginActorAssembly::Insert(Selected[0], NewAnchor, Reason))
+                    Origin::Notify(Selected.Num() == 1 ? Reason : FText::FromString(TEXT("Select exactly one Actor to insert an Origin Anchor above it.")));
+                else { GEditor->SelectNone(false, true, false); GEditor->SelectActor(NewAnchor, true, true, true); }
+            }),
+            FCanExecuteAction::CreateLambda([] { return GEditor && !GEditor->PlayWorld && Origin::SelectedActors().Num() == 1; }));
+        Commands->MapAction(FOriginCommands::Get().AdoptActors,
+            FExecuteAction::CreateLambda([SelectedForAdopt] {
+                auto Pair = SelectedForAdopt();
+                FText Reason;
+                if (!OriginActorAssembly::Adopt(Pair.Key, Pair.Value, Reason)) Origin::Notify(Reason);
+            }),
+            FCanExecuteAction::CreateLambda([SelectedForAdopt] {
+                if (!GEditor || GEditor->PlayWorld) return false;
+                auto Pair = SelectedForAdopt();
+                return Pair.Key && !Pair.Value.IsEmpty();
+            }));
+        Commands->MapAction(FOriginCommands::Get().PromoteActors,
+            FExecuteAction::CreateLambda([] {
+                FText Reason;
+                if (!OriginActorAssembly::Promote(Origin::SelectedActors(), Reason)) Origin::Notify(Reason);
+            }),
+            FCanExecuteAction::CreateLambda([] {
+                if (!GEditor || GEditor->PlayWorld) return false;
+                const TArray<AActor*> Actors = Origin::SelectedActors();
+                return !Actors.IsEmpty() && Cast<AOriginAnchor>(Actors[0]->GetAttachParentActor()) != nullptr;
+            }));
+        Commands->MapAction(FOriginCommands::Get().DetachActors,
+            FExecuteAction::CreateLambda([] {
+                FText Reason;
+                if (!OriginActorAssembly::Detach(Origin::SelectedActors(), Reason)) Origin::Notify(Reason);
+            }),
+            FCanExecuteAction::CreateLambda([] {
+                if (!GEditor || GEditor->PlayWorld) return false;
+                const TArray<AActor*> Actors = Origin::SelectedActors();
+                return !Actors.IsEmpty() && Cast<AOriginAnchor>(Actors[0]->GetAttachParentActor()) != nullptr;
             }));
         auto& LevelEditor = FModuleManager::LoadModuleChecked<FLevelEditorModule>(TEXT("LevelEditor"));
         LevelCommands = LevelEditor.GetGlobalLevelEditorActions();
@@ -152,6 +216,10 @@ public:
         {
             Commands->UnmapAction(FOriginCommands::Get().Create);
             Commands->UnmapAction(FOriginCommands::Get().Convert);
+            Commands->UnmapAction(FOriginCommands::Get().InsertActorPivot);
+            Commands->UnmapAction(FOriginCommands::Get().AdoptActors);
+            Commands->UnmapAction(FOriginCommands::Get().PromoteActors);
+            Commands->UnmapAction(FOriginCommands::Get().DetachActors);
         }
         Commands.Reset();
         FOriginCommands::Unregister();

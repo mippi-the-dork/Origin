@@ -1,6 +1,7 @@
 // Copyright Mippithedork 2026, Inc. All Rights Reserved.
 
 #include "OriginPivotComponent.h"
+#include "OriginPivotSlots.h"
 
 UOriginPivotComponent::UOriginPivotComponent()
 {
@@ -10,141 +11,44 @@ UOriginPivotComponent::UOriginPivotComponent()
     OriginPivotConfiguration.Slots.AddDefaulted();
 }
 
-bool UOriginPivotComponent::GetOriginPivotSlotDefinition(FName SlotName, FOriginPivotDefinition& OutDefinition) const
+bool UOriginPivotComponent::GetOriginPivotSlotDefinition(FName Name, FOriginPivotDefinition& Out) const
 {
-    if (const FOriginPivotSlot* Slot = OriginPivotConfiguration.FindSlot(SlotName))
-    {
-        OutDefinition = Slot->Definition;
-        return true;
-    }
-    return false;
+    return FOriginPivotSlots::Definition(OriginPivotConfiguration, Name, Out);
 }
 
-namespace
+bool UOriginPivotComponent::CreateOriginPivotSlot(FName Name, FText& Reason)
 {
-    bool ValidSlotName(FName Name)
-    {
-        return !Name.IsNone() && !Name.ToString().TrimStartAndEnd().IsEmpty();
-    }
-
-    bool ValidSlotPose(const FTransform& Pose)
-    {
-        return Pose.IsValid() && !Pose.ContainsNaN() && Pose.GetRotation().IsNormalized();
-    }
+    return FOriginPivotSlots::Create(OriginPivotConfiguration, Name, GetRelativeTransform(), false, GetAttachSocketName(), Reason);
 }
 
-bool UOriginPivotComponent::CreateOriginPivotSlot(FName SlotName, FText& FailureReason)
+bool UOriginPivotComponent::CaptureOriginPivotSlot(FName Name, FText& Reason)
 {
-    if (!ValidSlotName(SlotName) || OriginPivotConfiguration.FindSlot(SlotName))
-    {
-        FailureReason = FText::FromString(TEXT("Enter a unique, nonempty pivot slot name."));
-        return false;
-    }
-    const FTransform Pose = GetRelativeTransform();
-    if (!ValidSlotPose(Pose))
-    {
-        FailureReason = FText::FromString(TEXT("The pivot has an invalid transform; no slot was saved."));
-        return false;
-    }
-    FOriginPivotSlot& Added = OriginPivotConfiguration.Slots.AddDefaulted_GetRef();
-    Added.Name = SlotName;
-    Added.bHasSavedRelativeTransform = true;
-    Added.SavedRelativeTransform = Pose;
-    OriginPivotConfiguration.SchemaVersion = 2;
-    OriginPivotConfiguration.ActiveSlotName = SlotName;
-    FailureReason = FText::GetEmpty();
-    return true;
+    return FOriginPivotSlots::Capture(OriginPivotConfiguration, Name, GetRelativeTransform(), false, GetAttachSocketName(), Reason);
 }
 
-bool UOriginPivotComponent::CaptureOriginPivotSlot(FName SlotName, FText& FailureReason)
+bool UOriginPivotComponent::DuplicateOriginPivotSlot(FName Source, FName Name, FText& Reason)
 {
-    FOriginPivotSlot* Slot = OriginPivotConfiguration.FindSlot(SlotName);
-    if (!Slot)
-    {
-        FailureReason = FText::FromString(TEXT("The specified pivot slot does not exist."));
-        return false;
-    }
-    const FTransform Pose = GetRelativeTransform();
-    if (!ValidSlotPose(Pose))
-    {
-        FailureReason = FText::FromString(TEXT("The pivot has an invalid transform; no slot was changed."));
-        return false;
-    }
-    Slot->SavedRelativeTransform = Pose;
-    Slot->bHasSavedRelativeTransform = true;
-    OriginPivotConfiguration.SchemaVersion = 2;
-    OriginPivotConfiguration.ActiveSlotName = SlotName;
-    FailureReason = FText::GetEmpty();
-    return true;
+    return FOriginPivotSlots::Duplicate(OriginPivotConfiguration, Source, Name, Reason);
 }
 
-bool UOriginPivotComponent::DuplicateOriginPivotSlot(FName SourceName, FName NewName, FText& FailureReason)
+bool UOriginPivotComponent::RenameOriginPivotSlot(FName OldName, FName NewName, FText& Reason)
 {
-    // Copy before adding: the array can reallocate when a new slot is added.
-    const FOriginPivotSlot* Source = OriginPivotConfiguration.FindSlot(SourceName);
-    if (!Source || !ValidSlotName(NewName) || OriginPivotConfiguration.FindSlot(NewName))
-    {
-        FailureReason = FText::FromString(TEXT("Choose an existing source and a unique, nonempty new slot name."));
-        return false;
-    }
-    FOriginPivotSlot Copy = *Source;
-    Copy.Name = NewName;
-    OriginPivotConfiguration.Slots.Add(MoveTemp(Copy));
-    OriginPivotConfiguration.SchemaVersion = 2;
-    FailureReason = FText::GetEmpty();
-    return true;
+    return FOriginPivotSlots::Rename(OriginPivotConfiguration, OldName, NewName, Reason);
 }
 
-bool UOriginPivotComponent::RenameOriginPivotSlot(FName OldName, FName NewName, FText& FailureReason)
+void UOriginPivotComponent::GetOriginPivotSlotNames(TArray<FName>& Out) const
 {
-    FOriginPivotSlot* Slot = OriginPivotConfiguration.FindSlot(OldName);
-    if (!Slot || OldName == FName(TEXT("Default")) || !ValidSlotName(NewName) ||
-        OriginPivotConfiguration.FindSlot(NewName))
-    {
-        FailureReason = FText::FromString(TEXT("Default cannot be renamed. Enter a unique, nonempty name for an existing slot."));
-        return false;
-    }
-    Slot->Name = NewName;
-    if (OriginPivotConfiguration.ActiveSlotName == OldName)
-        OriginPivotConfiguration.ActiveSlotName = NewName;
-    FailureReason = FText::GetEmpty();
-    return true;
+    FOriginPivotSlots::Names(OriginPivotConfiguration, Out);
 }
 
-void UOriginPivotComponent::GetOriginPivotSlotNames(TArray<FName>& OutNames) const
+bool UOriginPivotComponent::DeleteOriginPivotSlot(FName Name, FText& Reason)
 {
-    OutNames.Reset();
-    for (const FOriginPivotSlot& Slot : OriginPivotConfiguration.Slots)
-        OutNames.Add(Slot.Name);
+    return FOriginPivotSlots::Delete(OriginPivotConfiguration, Name, Reason);
 }
 
-bool UOriginPivotComponent::DeleteOriginPivotSlot(FName SlotName, FText& FailureReason)
+bool UOriginPivotComponent::GetOriginPivotSlotPose(FName Name, FTransform& Out) const
 {
-    if (SlotName.IsNone() || SlotName == FName(TEXT("Default")) ||
-        SlotName == OriginPivotConfiguration.ActiveSlotName)
-    {
-        FailureReason = FText::FromString(TEXT("The Default slot and the active slot cannot be deleted. Activate a different slot first."));
-        return false;
-    }
-    const int32 Index = OriginPivotConfiguration.Slots.IndexOfByPredicate(
-        [SlotName](const FOriginPivotSlot& Slot) { return Slot.Name == SlotName; });
-    if (Index == INDEX_NONE)
-    {
-        FailureReason = FText::FromString(TEXT("The specified pivot slot does not exist."));
-        return false;
-    }
-    OriginPivotConfiguration.Slots.RemoveAt(Index);
-    FailureReason = FText::GetEmpty();
-    return true;
-}
-
-bool UOriginPivotComponent::GetOriginPivotSlotPose(FName SlotName, FTransform& OutRelativePose) const
-{
-    const FOriginPivotSlot* Slot = OriginPivotConfiguration.FindSlot(SlotName);
-    if (!Slot || !Slot->bHasSavedRelativeTransform || !ValidSlotPose(Slot->SavedRelativeTransform))
-        return false;
-    OutRelativePose = Slot->SavedRelativeTransform;
-    return true;
+    return FOriginPivotSlots::Pose(OriginPivotConfiguration, Name, Out);
 }
 
 EOriginPivotResult UOriginPivotComponent::ActivateOriginPivotSlot(FName SlotName, FText& FailureReason)
@@ -167,7 +71,17 @@ EOriginPivotResult UOriginPivotComponent::ActivateOriginPivotSlot(FName SlotName
     }
     FTransform Candidate = RelativePose;
     if (const USceneComponent* Parent = GetAttachParent())
-        Candidate = RelativePose * Parent->GetComponentTransform();
+    {
+        const FName SocketName = GetAttachSocketName();
+        const FOriginPivotSlot* Slot = OriginPivotConfiguration.FindSlot(SlotName);
+        if (!Slot || Slot->CapturedSocketName != SocketName ||
+            (!SocketName.IsNone() && !Parent->DoesSocketExist(SocketName)))
+        {
+            FailureReason = FText::FromString(TEXT("The pivot attachment socket changed or is missing. Recapture the slot in the current attachment frame."));
+            return EOriginPivotResult::InvalidPivot;
+        }
+        Candidate = RelativePose * Parent->GetSocketTransform(SocketName, RTS_World);
+    }
 
     // Preflight before moving anything or changing the active slot name.
     const EOriginPivotResult Preflight = CanSetOriginPivotWorldTransform(Candidate, FailureReason);

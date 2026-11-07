@@ -170,10 +170,9 @@ namespace
         }
         const FOriginPivotSlot* Existing = Pivot->OriginPivotConfiguration.FindSlot(Name);
         if ((bCreate && Existing) || (!bCreate && !Existing) ||
-            (bDelete && (Name == FName(TEXT("Default")) ||
-                Name == Pivot->OriginPivotConfiguration.ActiveSlotName)))
+            (bDelete && Name == FName(TEXT("Default"))))
         {
-            Reason = LOCTEXT("InvalidOperation", "That slot cannot be created, updated, or deleted. Check the name and active slot.");
+            Reason = LOCTEXT("InvalidOperation", "That slot cannot be created, updated, or deleted. Check the name; Default cannot be deleted.");
             return false;
         }
         UBlueprint* BP = nullptr;
@@ -274,11 +273,25 @@ bool FOriginPivotAuthoring::ActivateSlot(UOriginPivotComponent* Pivot, FName Nam
         Reason = LOCTEXT("Uncaptured", "This slot has no captured pose. Select it and use Capture Current before activating.");
         return false;
     }
+    const FOriginPivotSlot* Slot = Pivot->OriginPivotConfiguration.FindSlot(Name);
+    const FName Socket = Pivot->GetAttachSocketName();
+    if (!Slot || Slot->CapturedSocketName != Socket)
+    {
+        Reason = LOCTEXT("SlotSocketChanged", "The pivot attachment socket changed since capture. Recapture the slot in its current frame.");
+        return false;
+    }
     FTransform Candidate = StoredRelative;
     if (!Pivot->IsTemplate())
     {
         if (const USceneComponent* Parent = Pivot->GetAttachParent())
-            Candidate = StoredRelative * Parent->GetComponentTransform();
+        {
+            if (!Socket.IsNone() && !Parent->DoesSocketExist(Socket))
+            {
+                Reason = LOCTEXT("SlotSocketMissing", "The pivot attachment socket no longer exists. Recapture after choosing a valid socket.");
+                return false;
+            }
+            Candidate = StoredRelative * Parent->GetSocketTransform(Socket, RTS_World);
+        }
         else
         {
             Reason = LOCTEXT("SlotNeedsParent", "Root instances have no stable parent-local slot frame. Add a Scene Component root above Origin Pivot before activating slots.");

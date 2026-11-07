@@ -2,9 +2,11 @@
 
 #include "OriginDetails.h"
 #include "OriginOperations.h"
+#include "OriginAnchorAuthoring.h"
 #include "Editor.h"
 #include "ScopedTransaction.h"
 #include "Widgets/Input/SCheckBox.h"
+#include "Widgets/Input/SEditableTextBox.h"
 #include "Components/SceneComponent.h"
 #include "PropertyCustomizationHelpers.h"
 #include "AssetRegistry/AssetData.h"
@@ -70,6 +72,47 @@ namespace
             NextCheck=0;
         }
     };
+    // Anchor and component authoring share the same runtime slot rules. The
+    // editor adapter supplies transactions and records every affected component
+    // before moving a live assembly (runtime APIs never modify editor Undo).
+    struct FAnchorSlotPanelState
+    {
+        TWeakObjectPtr<AOriginAnchor> Anchor;
+        FName Selected = TEXT("Default");
+        FString Proposed = TEXT("NewPivot");
+        mutable double NextCheck = 0;
+        mutable bool bCachedCanEdit = false;
+
+        bool CanEdit() const
+        {
+            const double Now = FPlatformTime::Seconds();
+            if (Now >= NextCheck)
+            {
+                NextCheck = Now + 0.25; // Do not traverse large Actor assemblies every Slate frame.
+                FText Reason;
+                bCachedCanEdit = FOriginAnchorAuthoring::CanAuthor(Anchor.Get(), Reason);
+            }
+            return bCachedCanEdit;
+        }
+
+        void Apply(int32 Op)
+        {
+            AOriginAnchor* A = Anchor.Get();
+            FText Reason;
+            const FName NewName(*Proposed.TrimStartAndEnd());
+            if (!FOriginAnchorAuthoring::RunSlotAction(A,
+                static_cast<EOriginAnchorSlotAction>(Op), Selected, NewName, Reason))
+            {
+                Origin::Notify(Reason.IsEmpty()
+                    ? FText::FromString(TEXT("Unable to edit the selected pivot slot.")) : Reason);
+                return;
+            }
+            if (Op == 0 || Op == 4) Selected = NewName;
+            if (Op == 5 && A) Selected = A->OriginPivotConfiguration.ActiveSlotName;
+            NextCheck = 0;
+        }
+    };
+
     bool IsChildMode(EOriginPivotMode Mode)
     { return Mode==EOriginPivotMode::ChildActor || Mode==EOriginPivotMode::ComponentSocket; }
     USceneComponent* SourceComponent(AOriginAnchor* A)
@@ -345,6 +388,85 @@ void FOriginDetails::CustomizeDetails(IDetailLayoutBuilder& Builder)
             .ToolTipText(FText::FromString(TEXT("Set all offset coordinates to zero, keeping the chosen space.")))
             .IsEnabled_Lambda([State,Weak] { State->Update(); return State->bCanEdit && Weak.IsValid() && !Weak->OriginPivotOffset.IsZero(); })
             .OnClicked_Lambda([State] { State->Change([](Origin::FPivotSettings& S) { S.Offset=FVector::ZeroVector; }); return FReply::Handled(); })];
+    auto SlotState = MakeShared<FAnchorSlotPanelState>();
+    SlotState->Anchor = Weak;
+    if (Weak.IsValid()) SlotState->Selected = Weak->OriginPivotConfiguration.ActiveSlotName;
+    auto& SlotsGroup = Category.AddGroup(TEXT("OriginAnchorNamedSlots"),
+        FText::FromString(TEXT("Named Pivot Slots")), false, false);
+    SlotsGroup.AddWidgetRow().WholeRowContent()
+    [SNew(STextBlock).AutoWrapText(true)
+        .Text(FText::FromString(TEXT("Same slot operations as Origin Pivot components. A top-level Anchor captures world-space poses; attached Anchors capture parent-relative poses. Activation requires a movable, kinematic assembly.")))];
+    SlotsGroup.AddWidgetRow()
+        .NameContent()[SNew(STextBlock).Text(FText::FromString(TEXT("Slot")))]
+        .ValueContent().MinDesiredWidth(240)
+        [SNew(SComboButton)
+            .ToolTipText(FText::FromString(TEXT("Choose a saved Anchor slot. Uncaptured legacy slots cannot be activated.")))
+            .OnGetMenuContent_Lambda([SlotState] {
+                FMenuBuilder Menu(true,nullptr);
+                if (auto* A = SlotState->Anchor.Get())
+                {
+                    for (const FOriginPivotSlot& Slot : A->OriginPivotConfiguration.Slots)
+                    {
+                        const FName Name = Slot.Name;
+                        Entry(Menu, Name.ToString() + (Slot.bHasSavedRelativeTransform ? TEXT(" (Captured)") : TEXT(" (Uncaptured)")),
+                            [SlotState,Name] { SlotState->Selected = Name; });
+                    }
+                }
+                return Menu.MakeWidget();
+            })
+            .ButtonContent()[SNew(STextBlock)
+                .Text_Lambda([SlotState] {
+                    const auto* A = SlotState->Anchor.Get();
+                    const auto* Slot = A ? A->OriginPivotConfiguration.FindSlot(SlotState->Selected) : nullptr;
+                    return FText::FromString(SlotState->Selected.ToString() +
+                        ((Slot && Slot->bHasSavedRelativeTransform) ? TEXT(" (Captured)") : TEXT(" (Uncaptured)")));
+                })]];
+    SlotsGroup.AddWidgetRow()
+        .NameContent()[SNew(STextBlock).Text(FText::FromString(TEXT("New Name")))]
+        .ValueContent().MinDesiredWidth(240)
+        [SNew(SEditableTextBox).Text_Lambda([SlotState] { return FText::FromString(SlotState->Proposed); })
+            .ToolTipText(FText::FromString(TEXT("Enter a unique slot name for Create, Duplicate or Rename.")))
+            .OnTextChanged_Lambda([SlotState](const FText& Value) { SlotState->Proposed = Value.ToString(); })];
+    SlotsGroup.AddWidgetRow().WholeRowContent()
+    [SNew(SHorizontalBox)
+        + SHorizontalBox::Slot().AutoWidth().Padding(0,2,4,2)
+        [SNew(SButton).Text(FText::FromString(TEXT("Create + Capture")))
+            .ToolTipText(FText::FromString(TEXT("Save the current Anchor pose under a new name. Does not move attached Actors.")))
+            .IsEnabled_Lambda([SlotState] { return SlotState->CanEdit(); })
+            .OnClicked_Lambda([SlotState] { SlotState->Apply(0); return FReply::Handled(); })]
+        + SHorizontalBox::Slot().AutoWidth().Padding(0,2,4,2)
+        [SNew(SButton).Text(FText::FromString(TEXT("Capture Current")))
+            .ToolTipText(FText::FromString(TEXT("Replace the selected slot pose with the current Anchor pose.")))
+            .IsEnabled_Lambda([SlotState] { return SlotState->CanEdit(); })
+            .OnClicked_Lambda([SlotState] { SlotState->Apply(1); return FReply::Handled(); })]
+        + SHorizontalBox::Slot().AutoWidth().Padding(0,2,4,2)
+        [SNew(SButton).Text(FText::FromString(TEXT("Activate")))
+            .ToolTipText(FText::FromString(TEXT("Restore the captured Anchor pose, keeping attached Actors stationary. Runtime safety rules require a Movable hierarchy.")))
+            .IsEnabled_Lambda([SlotState] { return SlotState->CanEdit(); })
+            .OnClicked_Lambda([SlotState] { SlotState->Apply(2); return FReply::Handled(); })]];
+    SlotsGroup.AddWidgetRow().WholeRowContent()
+    [SNew(SHorizontalBox)
+        + SHorizontalBox::Slot().AutoWidth().Padding(0,2,4,2)
+        [SNew(SButton).Text(FText::FromString(TEXT("Duplicate")))
+            .ToolTipText(FText::FromString(TEXT("Copy the selected slot, including its definition and pose, without activating it.")))
+            .IsEnabled_Lambda([SlotState] { return SlotState->CanEdit(); })
+            .OnClicked_Lambda([SlotState] { SlotState->Apply(3); return FReply::Handled(); })]
+        + SHorizontalBox::Slot().AutoWidth().Padding(0,2,4,2)
+        [SNew(SButton).Text(FText::FromString(TEXT("Rename")))
+            .ToolTipText(FText::FromString(TEXT("Rename a non-Default slot; the active name is updated automatically.")))
+            .IsEnabled_Lambda([SlotState] { return SlotState->CanEdit(); })
+            .OnClicked_Lambda([SlotState] { SlotState->Apply(4); return FReply::Handled(); })]
+        + SHorizontalBox::Slot().AutoWidth().Padding(0,2,4,2)
+        [SNew(SButton).Text(FText::FromString(TEXT("Delete")))
+            .ToolTipText(FText::FromString(TEXT("Delete a named slot, including the active slot. The active selection returns to Default without moving the assembly. Default cannot be deleted.")))
+            .IsEnabled_Lambda([SlotState] {
+                const AOriginAnchor* Anchor = SlotState->Anchor.Get();
+                return SlotState->CanEdit() && Anchor &&
+                    SlotState->Selected != FName(TEXT("Default")) &&
+                    Anchor->OriginPivotConfiguration.FindSlot(SlotState->Selected) != nullptr;
+            })
+            .OnClicked_Lambda([SlotState] { SlotState->Apply(5); return FReply::Handled(); })]];
+
     Category.AddCustomRow(FText::FromString(TEXT("Pivot Status"))).WholeRowContent().VAlign(VAlign_Center)
         [SNew(STextBlock).AutoWrapText(true).Text_Lambda([State] { State->Update(); return State->RecalculateReason; })];
     Category.AddCustomRow(FText::FromString(TEXT("Recalculate Release Convert"))).WholeRowContent()

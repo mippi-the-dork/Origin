@@ -1,5 +1,4 @@
-> **Origin 2.0.0-alpha.5.1-hardening.3-diagnostics development preview**
-> This diagnostic-only pass investigates the still-reproducible Undo/Redo reinsertion transform failure. The structural operation, transaction behavior, and test assertions are unchanged. See [Alpha 5.1 diagnostics](Doc/ALPHA_5_1_HARDENING_3.md). Alpha 5.1 adds **Blueprint SCS hierarchy authoring** (adopt a sibling, promote a child, insert a new pivot above a child), with preflight transform preservation and editor Undo transactions. See [Alpha 5.1 hierarchy guide](Doc/ALPHA_5_1_HIERARCHY.md). Alpha 5 also added **named local-space pivot slots** (create/capture/activate/duplicate/rename/delete) and **pivot snap/align** to direct child origins and parent transforms, in both Level and authored Blueprint component Details. Switching slots preserves attached content. This is an unreleased source preview and must be compiled/tested in UE 5.8.3. See [Alpha 5 guide](Doc/ALPHA_5_NAMED_SLOTS.md), [Automation tests](Doc/AUTOMATED_TESTS.md), [Runtime component](Doc/BLUEPRINT_RUNTIME_COMPONENT.md), and [2.0 roadmap](Doc/ROADMAP_2_0.md). The Alpha 4.2 Blueprint viewport fix was manually validated; the performance regression was reproduced without Origin using ordinary Scene Components.
+> **Origin 2.0.0-alpha.5.3-hotfix.1 development preview** — Adds named-slot and child-preserving pivot API parity between **Origin Anchors** (Actors) and **Origin Pivot** components. Both use the same slot rules, while Actor and Blueprint SCS hierarchy editing retain their respective Unreal attachment safeguards. A new **Named Pivot Slots** group appears on Anchor Details. Alpha 5.3 includes native parity/robustness tests; Hotfix 1 adds three active-slot deletion regressions and permits returning to Default-only slots without moving geometry. [Alpha 5.3 parity and QA](Doc/ALPHA_5_3_PARITY_AND_ROBUSTNESS.md). The original Alpha 5.3 tests passed in UE 5.8.3; the Hotfix 1 changes require validation.
 
 # Origin
 
@@ -37,6 +36,10 @@ Origin also adds hierarchy-selection controls and drag feedback directly to the 
 ### Origin Anchors
 
 Create a dedicated transform parent above selected Actors while preserving their existing world transforms.
+
+### Level Editor Hierarchy Authoring (Alpha 5.2)
+
+Insert an Origin Anchor above an Actor, reparent selected Actors into an Anchor, promote direct children to the Anchor's parent, or detach children to the level root. Existing world transforms and nested attachments are preserved by validated structural transactions. Use the **Origin** submenu on the Actor/Outliner context menu. See the [Alpha 5.2 guide](Doc/ALPHA_5_2_ACTOR_ASSEMBLIES.md) for restrictions, including unsupported World Partition restructuring.
 
 ### Adjustable Assembly Pivots
 

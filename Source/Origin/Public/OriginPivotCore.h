@@ -7,6 +7,10 @@
 
 class USceneComponent;
 
+/** Shared event payload for both Actor and component pivot edits. */
+DECLARE_DYNAMIC_MULTICAST_DELEGATE_TwoParams(FOriginPivotChangedSignature,
+    FTransform, PreviousPivotWorldTransform, FTransform, NewPivotWorldTransform);
+
 /** The result of a pivot edit. A successful NoChange does not broadcast a change event. */
 UENUM(BlueprintType)
 enum class EOriginPivotResult : uint8

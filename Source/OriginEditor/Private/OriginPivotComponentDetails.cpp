@@ -424,13 +424,13 @@ void FOriginPivotComponentDetails::CustomizeDetails(IDetailLayoutBuilder& Builde
             + SHorizontalBox::Slot().AutoWidth().Padding(0, 2, 0, 2)
             [SNew(SButton)
                 .Text(LOCTEXT("DeleteSlot", "Delete"))
-                .ToolTipText(LOCTEXT("DeleteSlotTip", "Delete a non-active, non-Default slot. Does not move the pivot."))
+                .ToolTipText(LOCTEXT("DeleteSlotTip", "Delete the selected named slot, including the active slot. Deleting the active slot selects Default without moving the pivot. Default cannot be deleted."))
                 .IsEnabled_Lambda([State]
                 {
                     const UOriginPivotComponent* Target = State->Component.Get();
                     return State->CanAuthorSlots() && Target &&
                         State->SelectedSlotName != FName(TEXT("Default")) &&
-                        Target->OriginPivotConfiguration.ActiveSlotName != State->SelectedSlotName;
+                        Target->OriginPivotConfiguration.FindSlot(State->SelectedSlotName) != nullptr;
                 })
                 .OnClicked_Lambda([State] { return State->SlotOperation(3); })]];
 
