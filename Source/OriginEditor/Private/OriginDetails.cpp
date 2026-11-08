@@ -3,6 +3,7 @@
 #include "OriginDetails.h"
 #include "OriginOperations.h"
 #include "OriginAnchorAuthoring.h"
+#include "OriginPivotAuthoring.h"
 #include "Editor.h"
 #include "ScopedTransaction.h"
 #include "Widgets/Input/SCheckBox.h"
@@ -391,6 +392,41 @@ void FOriginDetails::CustomizeDetails(IDetailLayoutBuilder& Builder)
     auto SlotState = MakeShared<FAnchorSlotPanelState>();
     SlotState->Anchor = Weak;
     if (Weak.IsValid()) SlotState->Selected = Weak->OriginPivotConfiguration.ActiveSlotName;
+    auto& SnapGroup = Category.AddGroup(TEXT("OriginAnchorSnap"),
+        FText::FromString(TEXT("Snap / Align Pivot")), false, false);
+    SnapGroup.AddWidgetRow().WholeRowContent()
+        [SNew(SHorizontalBox)
+            + SHorizontalBox::Slot().FillWidth(1).Padding(0, 2, 4, 2)
+            [SNew(SButton).Text(FText::FromString(TEXT("Avg Child Origins")))
+                .ToolTipText(FText::FromString(TEXT("Move the Anchor pivot to the average of its direct child Actor origins while keeping attached geometry still.")))
+                .IsEnabled_Lambda([State] { State->Update(); return State->bCanEdit; })
+                .OnClicked_Lambda([Weak] {
+                    FText Reason;
+                    if (!FOriginAnchorAuthoring::SnapPivot(Weak.Get(), EOriginPivotSnapAction::AverageDirectChildren, Reason))
+                        Origin::Notify(Reason);
+                    return FReply::Handled();
+                })]
+            + SHorizontalBox::Slot().FillWidth(1).Padding(0, 2, 4, 2)
+            [SNew(SButton).Text(FText::FromString(TEXT("To Parent")))
+                .ToolTipText(FText::FromString(TEXT("Move the Anchor pivot to its parent component/socket origin; use world origin when unattached.")))
+                .IsEnabled_Lambda([State] { State->Update(); return State->bCanEdit; })
+                .OnClicked_Lambda([Weak] {
+                    FText Reason;
+                    if (!FOriginAnchorAuthoring::SnapPivot(Weak.Get(), EOriginPivotSnapAction::ParentOrigin, Reason))
+                        Origin::Notify(Reason);
+                    return FReply::Handled();
+                })]
+            + SHorizontalBox::Slot().FillWidth(1).Padding(0, 2, 0, 2)
+            [SNew(SButton).Text(FText::FromString(TEXT("Match Parent Rotation")))
+                .ToolTipText(FText::FromString(TEXT("Align the Anchor pivot rotation to its parent socket while preserving child transforms.")))
+                .IsEnabled_Lambda([State] { State->Update(); return State->bCanEdit; })
+                .OnClicked_Lambda([Weak] {
+                    FText Reason;
+                    if (!FOriginAnchorAuthoring::SnapPivot(Weak.Get(), EOriginPivotSnapAction::ParentOrientation, Reason))
+                        Origin::Notify(Reason);
+                    return FReply::Handled();
+                })]];
+
     auto& SlotsGroup = Category.AddGroup(TEXT("OriginAnchorNamedSlots"),
         FText::FromString(TEXT("Named Pivot Slots")), false, false);
     SlotsGroup.AddWidgetRow().WholeRowContent()

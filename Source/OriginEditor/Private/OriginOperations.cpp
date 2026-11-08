@@ -1,6 +1,7 @@
 // Copyright Mippithedork 2026, Inc. All Rights Reserved.
 
 #include "OriginOperations.h"
+#include "OriginPivotSnapMath.h"
 #include "Editor.h"
 #include "Editor/EditorEngine.h"
 #include "Editor/UnrealEdEngine.h"
@@ -167,71 +168,63 @@ namespace Origin
             A.ComponentName==B.ComponentName && A.SocketName==B.SocketName &&
             A.Offset==B.Offset && A.bLocalOffset==B.bLocalOffset;
     }
-    // Read-only evaluation. Missing or unloaded references never move the pivot
-    // to the origin and never cause synchronous actor/asset loading.
+    // Editor Actor adapter for the same runtime-safe calculation math used by
+    // Origin Pivot components. Only source resolution is host-specific.
     static bool EvaluatePivot(AOriginAnchor* A, const FPivotSettings& S, FVector& Target, FText& Reason)
     {
-        auto Fail=[&Reason](const TCHAR* Text) { Reason=FText::FromString(Text); return false; };
-        const auto Children=DirectChildren(A);
-        switch(S.Mode)
-        {
-        case EOriginPivotMode::BoundsCenter:
-        case EOriginPivotMode::BottomCenter:
-        case EOriginPivotMode::BoundsPoint:
+        auto Fail = [&Reason](const TCHAR* Text) { Reason = FText::FromString(Text); return false; };
+        const TArray<AActor*> Children = DirectChildren(A);
+        FOriginPivotDefinition Definition;
+        Definition.PositionMode = S.Mode;
+        Definition.BoundsAxes = S.BoundsAxes;
+        Definition.CustomPosition = S.Custom;
+        Definition.Offset = S.Offset;
+        Definition.bLocalOffset = S.bLocalOffset;
+        FOriginPivotCalculationInput Input;
+        Input.PivotRotation = A->GetActorQuat();
+        if (S.Mode == EOriginPivotMode::BoundsCenter || S.Mode == EOriginPivotMode::BottomCenter ||
+            S.Mode == EOriginPivotMode::BoundsPoint)
         {
             if (Children.IsEmpty()) return Fail(TEXT("Add at least one child actor to calculate assembly bounds."));
-            const FBox Bounds=AssemblyBounds(Children);
-            if (!Bounds.IsValid) return Fail(TEXT("The assembly has no valid bounds."));
-            Target=Bounds.GetCenter();
-            if (S.Mode==EOriginPivotMode::BottomCenter) Target.Z=Bounds.Min.Z;
-            if (S.Mode==EOriginPivotMode::BoundsPoint) for(int32 Axis=0;Axis<3;++Axis)
-            {
-                if (S.BoundsAxes[Axis]<0 || S.BoundsAxes[Axis]>2) return Fail(TEXT("Choose Min, Center or Max for each bounds axis."));
-                Target[Axis]=S.BoundsAxes[Axis]==0 ? Bounds.Min[Axis] : S.BoundsAxes[Axis]==2 ? Bounds.Max[Axis] : Target[Axis];
-            }
-            break;
+            Input.AssemblyBounds = AssemblyBounds(Children);
         }
-        case EOriginPivotMode::AverageChildPivots:
-            if (Children.IsEmpty()) return Fail(TEXT("Add at least one child actor to average child pivots."));
-            Target=FVector::ZeroVector;
-            for(AActor* Child:Children) Target+=Child->GetActorLocation();
-            Target/=Children.Num(); break;
-        case EOriginPivotMode::ChildActor:
-        case EOriginPivotMode::ComponentSocket:
+        if (S.Mode == EOriginPivotMode::AverageChildPivots)
+            for (AActor* Child : Children) Input.DirectChildOrigins.Add(Child->GetActorLocation());
+        if (S.Mode == EOriginPivotMode::ChildActor || S.Mode == EOriginPivotMode::ComponentSocket)
         {
-            AActor* Child=S.Child.Get();
+            AActor* Child = S.Child.Get(); // Never synchronously load soft references.
             if (!Children.Contains(Child)) return Fail(TEXT("Choose a loaded direct child as the pivot source."));
-            Target=Child->GetActorLocation();
-            if(S.Mode==EOriginPivotMode::ComponentSocket)
+            Input.ReferencePosition = Child->GetActorLocation();
+            Input.bHasReferencePosition = true;
+            if (S.Mode == EOriginPivotMode::ComponentSocket)
             {
-                USceneComponent* Component=nullptr;
-                TArray<USceneComponent*> Components; Child->GetComponents(Components);
-                for(USceneComponent* C:Components) if(IsValid(C) && C->GetFName()==S.ComponentName) { Component=C; break; }
-                if(!Component || !Component->IsRegistered()) return Fail(TEXT("Choose an available scene component on the selected child."));
-                if(S.SocketName.IsNone()) Target=Component->GetComponentLocation();
-                else
-                {
-                    if(!Component->DoesSocketExist(S.SocketName)) return Fail(TEXT("The selected socket is missing. Choose an available socket or Component Origin."));
-                    Target=Component->GetSocketLocation(S.SocketName);
-                }
+                USceneComponent* Component = nullptr;
+                TArray<USceneComponent*> Components;
+                Child->GetComponents(Components);
+                for (USceneComponent* C : Components)
+                    if (IsValid(C) && C->GetFName() == S.ComponentName) { Component = C; break; }
+                if (!Component || !Component->IsRegistered())
+                    return Fail(TEXT("Choose an available scene component on the selected child."));
+                if (!S.SocketName.IsNone() && !Component->DoesSocketExist(S.SocketName))
+                    return Fail(TEXT("The selected socket is missing. Choose an available socket or Component Origin."));
+                Input.ReferencePosition = S.SocketName.IsNone()
+                    ? Component->GetComponentLocation() : Component->GetSocketLocation(S.SocketName);
             }
-            break;
         }
-        case EOriginPivotMode::ReferenceActor:
+        if (S.Mode == EOriginPivotMode::ReferenceActor)
         {
-            AActor* Reference=S.Reference.Get();
-            if(!IsEditorActor(Reference) || Reference->GetWorld()!=A->GetWorld())
+            AActor* Reference = S.Reference.Get();
+            if (!IsEditorActor(Reference) || Reference->GetWorld() != A->GetWorld())
                 return Fail(TEXT("Choose a loaded reference actor in the same editor world."));
-            for(AActor* P=Reference;P;P=P->GetAttachParentActor())
-                if(P==A) return Fail(TEXT("Choose a reference outside this assembly. Use Child Actor for a child pivot."));
-            Target=Reference->GetActorLocation(); break;
+            for (AActor* Parent = Reference; Parent; Parent = Parent->GetAttachParentActor())
+                if (Parent == A) return Fail(TEXT("Choose a reference outside this assembly. Use Child Actor for a child pivot."));
+            Input.ReferencePosition = Reference->GetActorLocation();
+            Input.bHasReferencePosition = true;
         }
-        case EOriginPivotMode::WorldOrigin: Target=FVector::ZeroVector; break;
-        case EOriginPivotMode::Custom: Target=S.Custom; break;
-        default: return Fail(TEXT("Choose a supported pivot mode."));
-        }
-        Target+=S.bLocalOffset ? A->GetActorQuat().RotateVector(S.Offset) : S.Offset;
-        if(Target.ContainsNaN()) return Fail(TEXT("The calculated position is not finite. Check source transforms and offsets."));
+        FString Error;
+        if (!FOriginPivotSnapMath::CalculatePosition(Definition, Input, Target, Error))
+        { Reason = FText::FromString(Error); return false; }
+        Reason = FText::GetEmpty();
         return true;
     }
     bool CanRecalculate(AOriginAnchor* A, FText& Reason)

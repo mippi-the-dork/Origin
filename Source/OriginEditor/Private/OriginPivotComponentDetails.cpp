@@ -22,6 +22,10 @@
 #include "Widgets/Input/SComboBox.h"
 #include "Widgets/Input/SEditableTextBox.h"
 #include "Widgets/Input/SNumericEntryBox.h"
+#include "Widgets/Input/SComboButton.h"
+#include "PropertyCustomizationHelpers.h"
+#include "AssetRegistry/AssetData.h"
+#include "Framework/MultiBox/MultiBoxBuilder.h"
 #include "Widgets/SBoxPanel.h"
 #include "IDetailGroup.h"
 #include "GameFramework/Actor.h"
@@ -32,6 +36,23 @@
 
 namespace
 {
+    const TCHAR* SourceModeLabel(EOriginPivotMode Mode)
+    {
+        switch (Mode)
+        {
+        case EOriginPivotMode::BoundsCenter: return TEXT("Bounds Center");
+        case EOriginPivotMode::AverageChildPivots: return TEXT("Average Child Origins");
+        case EOriginPivotMode::BottomCenter: return TEXT("Bottom Center");
+        case EOriginPivotMode::BoundsPoint: return TEXT("Bounds Point");
+        case EOriginPivotMode::ChildActor: return TEXT("Child Component");
+        case EOriginPivotMode::ComponentSocket: return TEXT("Component / Socket");
+        case EOriginPivotMode::ReferenceActor: return TEXT("Reference Actor");
+        case EOriginPivotMode::WorldOrigin: return TEXT("World Origin");
+        case EOriginPivotMode::Custom: return TEXT("Custom Position");
+        default: return TEXT("Unknown");
+        }
+    }
+
     struct FOriginPivotEditState
     {
         TWeakObjectPtr<UOriginPivotComponent> Component;
@@ -106,6 +127,28 @@ namespace
         bool CanAuthorSlots() const
         {
             return FOriginPivotAuthoring::CanAuthor(Component.Get());
+        }
+
+        FOriginPivotDefinition Source() const
+        { return FOriginPivotAuthoring::ReadSourceDefinition(Component.Get()); }
+
+        void SourceChange(TFunctionRef<void(FOriginPivotDefinition&)> Edit)
+        {
+            UOriginPivotComponent* Pivot = Component.Get();
+            if (!CanAuthorSlots() || !Pivot) return;
+            FOriginPivotDefinition Definition = Source();
+            Edit(Definition);
+            FText Reason;
+            if (!FOriginPivotAuthoring::SaveSourceDefinition(Pivot, Definition, Reason))
+                Origin::Notify(Reason);
+        }
+
+        FReply RecalculateSource()
+        {
+            FText Reason;
+            if (!FOriginPivotAuthoring::RecalculateSourcePivot(Component.Get(), Reason))
+                Origin::Notify(Reason);
+            return FReply::Handled();
         }
 
         bool IsSelectedCaptured() const
@@ -451,6 +494,175 @@ void FOriginPivotComponentDetails::CustomizeDetails(IDetailLayoutBuilder& Builde
                     return State->CanAuthorSlots() && State->SelectedSlotName != FName(TEXT("Default"));
                 })
                 .OnClicked_Lambda([State] { return State->SlotOperation(5); })]];
+
+    // Source-calculation rules are stored on the Default slot. Editing a rule
+    // never changes an explicitly captured pose or moves the assembly; the
+    // Recalculate button uses the same transaction service as Snap/Align.
+    IDetailGroup& SourceRules = Category.AddGroup(TEXT("OriginPivotSources"),
+        LOCTEXT("SourceRules", "Calculated Pivot Source"), false, true);
+    SourceRules.AddWidgetRow().WholeRowContent()
+        [SNew(STextBlock).AutoWrapText(true)
+            .Text(LOCTEXT("SourceHelp", "Choose a source rule, then Recalculate Pivot. Level instances use world coordinates; authored Blueprint components use the pivot parent's local frame. Existing named poses are never overwritten."))];
+    SourceRules.AddWidgetRow()
+        .NameContent()[SNew(STextBlock).Text(LOCTEXT("SourceMode", "Pivot Mode"))]
+        .ValueContent().MinDesiredWidth(240)
+        [SNew(SComboButton).IsEnabled_Lambda([State] { return State->CanAuthorSlots(); })
+            .ButtonContent()[SNew(STextBlock).Text_Lambda([State] {
+                return FText::FromString(SourceModeLabel(State->Source().PositionMode));
+            })]
+            .OnGetMenuContent_Lambda([State] {
+                FMenuBuilder Menu(true, nullptr);
+                for (int32 Index = 0; Index < 9; ++Index)
+                {
+                    const EOriginPivotMode Mode = static_cast<EOriginPivotMode>(Index);
+                    Menu.AddMenuEntry(FText::FromString(SourceModeLabel(Mode)), FText::GetEmpty(), FSlateIcon(),
+                        FUIAction(FExecuteAction::CreateLambda([State, Mode] {
+                            State->SourceChange([Mode](FOriginPivotDefinition& Definition) {
+                                Definition.PositionMode = Mode;
+                            });
+                        })));
+                }
+                return Menu.MakeWidget();
+            })];
+    auto ShowSourceMode = [State](EOriginPivotMode Mode) {
+        return TAttribute<EVisibility>::CreateLambda([State, Mode] {
+            return State->Source().PositionMode == Mode ? EVisibility::Visible : EVisibility::Collapsed;
+        });
+    };
+    auto ShowChildSource = TAttribute<EVisibility>::CreateLambda([State] {
+        const auto Mode = State->Source().PositionMode;
+        return Mode == EOriginPivotMode::ChildActor || Mode == EOriginPivotMode::ComponentSocket
+            ? EVisibility::Visible : EVisibility::Collapsed;
+    });
+    SourceRules.AddWidgetRow().Visibility(ShowChildSource)
+        .NameContent()[SNew(STextBlock).Text(LOCTEXT("SourceChildComponent", "Direct Child"))]
+        .ValueContent().MinDesiredWidth(240)
+        [SNew(SComboButton).IsEnabled_Lambda([State] { return State->CanAuthorSlots(); })
+            .ButtonContent()[SNew(STextBlock).Text_Lambda([State] {
+                const FName Name = State->Source().ComponentName;
+                return Name.IsNone() ? LOCTEXT("ChooseSourceChild", "Choose child component") : FText::FromName(Name);
+            })]
+            .OnGetMenuContent_Lambda([State] {
+                FMenuBuilder Menu(true, nullptr);
+                TArray<FName> Names;
+                FOriginPivotAuthoring::ListDirectSourceComponents(State->Component.Get(), Names);
+                for (const FName Name : Names)
+                    Menu.AddMenuEntry(FText::FromName(Name), FText::GetEmpty(), FSlateIcon(),
+                        FUIAction(FExecuteAction::CreateLambda([State, Name] {
+                            State->SourceChange([Name](FOriginPivotDefinition& Definition) {
+                                Definition.ComponentName = Name;
+                                Definition.SocketName = NAME_None;
+                                Definition.ChildActor.Reset();
+                            });
+                        })));
+                return Menu.MakeWidget();
+            })];
+    SourceRules.AddWidgetRow().Visibility(ShowSourceMode(EOriginPivotMode::ComponentSocket))
+        .NameContent()[SNew(STextBlock).Text(LOCTEXT("SourceSocket", "Socket"))]
+        .ValueContent().MinDesiredWidth(240)
+        [SNew(SComboButton).IsEnabled_Lambda([State] { return State->CanAuthorSlots(); })
+            .ButtonContent()[SNew(STextBlock).Text_Lambda([State] {
+                const FName Socket = State->Source().SocketName;
+                return Socket.IsNone() ? LOCTEXT("ComponentOrigin", "Component Origin") : FText::FromName(Socket);
+            })]
+            .OnGetMenuContent_Lambda([State] {
+                FMenuBuilder Menu(true, nullptr);
+                TArray<FName> Sockets;
+                FOriginPivotAuthoring::ListSourceSockets(State->Component.Get(), State->Source().ComponentName, Sockets);
+                for (const FName Socket : Sockets)
+                    Menu.AddMenuEntry(Socket.IsNone() ? LOCTEXT("SourceComponentOrigin", "Component Origin") : FText::FromName(Socket),
+                        FText::GetEmpty(), FSlateIcon(), FUIAction(FExecuteAction::CreateLambda([State, Socket] {
+                            State->SourceChange([Socket](FOriginPivotDefinition& Definition) {
+                                Definition.SocketName = Socket;
+                            });
+                        })));
+                return Menu.MakeWidget();
+            })];
+    SourceRules.AddWidgetRow().Visibility(ShowSourceMode(EOriginPivotMode::ReferenceActor))
+        .NameContent()[SNew(STextBlock).Text(LOCTEXT("ReferenceSourceActor", "Reference Actor"))]
+        .ValueContent().MinDesiredWidth(240)
+        [SNew(SObjectPropertyEntryBox).AllowedClass(AActor::StaticClass())
+            .AllowClear(true).DisplayThumbnail(false)
+            .ToolTipText(LOCTEXT("ReferenceSourceTip", "Loaded world Actor outside this assembly. Unavailable on Blueprint component templates."))
+            .IsEnabled_Lambda([State] { return State->CanAuthorSlots() && !State->Component->IsTemplate(); })
+            .ObjectPath_Lambda([State] { return State->Source().ReferenceActor.ToSoftObjectPath().ToString(); })
+            .OnObjectChanged_Lambda([State](const FAssetData& Data) {
+                AActor* Actor = Cast<AActor>(Data.GetAsset());
+                State->SourceChange([Actor](FOriginPivotDefinition& Definition) {
+                    Definition.ReferenceActor = Actor;
+                });
+            })];
+
+    auto Coordinates = [State](bool bOffset) -> TSharedRef<SWidget> {
+        auto Row = SNew(SHorizontalBox);
+        for (int32 Axis = 0; Axis < 3; ++Axis)
+            Row->AddSlot().FillWidth(1).Padding(2, 0)
+            [SNew(SNumericEntryBox<double>).AllowSpin(false)
+                .IsEnabled_Lambda([State] { return State->CanAuthorSlots(); })
+                .Value_Lambda([State, Axis, bOffset]() -> TOptional<double> {
+                    const FOriginPivotDefinition Definition = State->Source();
+                    return (bOffset ? Definition.Offset : Definition.CustomPosition)[Axis];
+                })
+                .OnValueCommitted_Lambda([State, Axis, bOffset](double Value, ETextCommit::Type Commit) {
+                    if (Commit == ETextCommit::OnCleared) return;
+                    State->SourceChange([Axis, bOffset, Value](FOriginPivotDefinition& Definition) {
+                        (bOffset ? Definition.Offset : Definition.CustomPosition)[Axis] = Value;
+                    });
+                })];
+        return Row;
+    };
+    SourceRules.AddWidgetRow().Visibility(ShowSourceMode(EOriginPivotMode::Custom))
+        .NameContent()[SNew(STextBlock).Text(LOCTEXT("SourceCustom", "Custom X / Y / Z"))]
+        .ValueContent().MinDesiredWidth(240)[Coordinates(false)];
+    auto Axes = SNew(SHorizontalBox);
+    for (int32 Axis = 0; Axis < 3; ++Axis)
+        Axes->AddSlot().FillWidth(1).Padding(2, 0)
+        [SNew(SComboButton).IsEnabled_Lambda([State] { return State->CanAuthorSlots(); })
+            .ButtonContent()[SNew(STextBlock).Text_Lambda([State, Axis] {
+                const int32 Value = State->Source().BoundsAxes[Axis];
+                return FText::FromString(Value == 0 ? TEXT("Min") : Value == 2 ? TEXT("Max") : TEXT("Center"));
+            })]
+            .OnGetMenuContent_Lambda([State, Axis] {
+                FMenuBuilder Menu(true, nullptr);
+                for (int32 Value = 0; Value < 3; ++Value)
+                    Menu.AddMenuEntry(FText::FromString(Value == 0 ? TEXT("Min") : Value == 2 ? TEXT("Max") : TEXT("Center")),
+                        FText::GetEmpty(), FSlateIcon(), FUIAction(FExecuteAction::CreateLambda([State, Axis, Value] {
+                            State->SourceChange([Axis, Value](FOriginPivotDefinition& Definition) {
+                                Definition.BoundsAxes[Axis] = Value;
+                            });
+                        })));
+                return Menu.MakeWidget();
+            })];
+    SourceRules.AddWidgetRow().Visibility(ShowSourceMode(EOriginPivotMode::BoundsPoint))
+        .NameContent()[SNew(STextBlock).Text(LOCTEXT("SourceAxes", "Bounds X / Y / Z"))]
+        .ValueContent().MinDesiredWidth(240)[Axes];
+    SourceRules.AddWidgetRow()
+        .NameContent()[SNew(STextBlock).Text(LOCTEXT("SourceOffsetSpace", "Offset Space"))]
+        .ValueContent().MinDesiredWidth(240)
+        [SNew(SComboButton).IsEnabled_Lambda([State] { return State->CanAuthorSlots(); })
+            .ButtonContent()[SNew(STextBlock).Text_Lambda([State] {
+                return State->Source().bLocalOffset ? LOCTEXT("LocalSourceSpace", "Pivot Local")
+                    : LOCTEXT("WorldSourceSpace", "Calculation Frame");
+            })]
+            .OnGetMenuContent_Lambda([State] {
+                FMenuBuilder Menu(true, nullptr);
+                for (int32 Value = 0; Value < 2; ++Value)
+                    Menu.AddMenuEntry(Value ? LOCTEXT("OffsetLocal", "Pivot Local") : LOCTEXT("OffsetFrame", "Calculation Frame"),
+                        FText::GetEmpty(), FSlateIcon(), FUIAction(FExecuteAction::CreateLambda([State, Value] {
+                            State->SourceChange([Value](FOriginPivotDefinition& Definition) {
+                                Definition.bLocalOffset = Value != 0;
+                            });
+                        })));
+                return Menu.MakeWidget();
+            })];
+    SourceRules.AddWidgetRow()
+        .NameContent()[SNew(STextBlock).Text(LOCTEXT("SourceOffset", "Offset X / Y / Z"))]
+        .ValueContent().MinDesiredWidth(240)[Coordinates(true)];
+    SourceRules.AddWidgetRow().WholeRowContent()
+        [SNew(SButton).Text(LOCTEXT("CalculateSourceButton", "Recalculate Pivot"))
+            .ToolTipText(LOCTEXT("CalculateSourceTip", "Apply the current source to the pivot without moving the assembly or overwriting captured named poses. Invalid or missing sources are rejected."))
+            .IsEnabled_Lambda([State] { return State->CanAuthorSlots(); })
+            .OnClicked_Lambda([State] { return State->RecalculateSource(); })];
 
     IDetailGroup& Snap = Category.AddGroup(TEXT("OriginPivotSnap"),
         LOCTEXT("SnapGroup", "Snap / Align Pivot"), false, true);

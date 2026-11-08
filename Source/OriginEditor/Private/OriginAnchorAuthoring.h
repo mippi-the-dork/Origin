@@ -3,6 +3,7 @@
 
 #include "CoreMinimal.h"
 class AOriginAnchor;
+enum class EOriginPivotSnapAction : uint8;
 
 enum class EOriginAnchorSlotAction : uint8
 {
@@ -13,6 +14,9 @@ enum class EOriginAnchorSlotAction : uint8
 struct FOriginAnchorAuthoring
 {
     static bool CanAuthor(AOriginAnchor* Anchor, FText& Reason);
+    static bool ComputeSnapCandidate(AOriginAnchor* Anchor, EOriginPivotSnapAction Action,
+        FTransform& OutCandidate, FText& Reason);
+    static bool SnapPivot(AOriginAnchor* Anchor, EOriginPivotSnapAction Action, FText& Reason);
     static bool RunSlotAction(AOriginAnchor* Anchor, EOriginAnchorSlotAction Action,
         FName SelectedName, FName NewName, FText& Reason);
 };

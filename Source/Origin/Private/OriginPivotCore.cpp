@@ -28,6 +28,19 @@ namespace
             && FMath::IsNearlyEqual(Scale.Y, Scale.Z, Tolerance);
     }
 
+    // IsVisualizationComponent() is only exposed by editor builds of Unreal.
+    // Editor-only billboards are not present in packaged games, so there is
+    // nothing to filter when WITH_EDITOR is disabled.
+    bool IsEditorVisualizationComponent(const USceneComponent* Component)
+    {
+#if WITH_EDITOR
+        return Component && Component->IsVisualizationComponent();
+#else
+        (void)Component;
+        return false;
+#endif
+    }
+
     void GatherDescendants(const USceneComponent* Pivot, TArray<USceneComponent*>& OutDescendants)
     {
         Pivot->GetChildrenComponents(true, OutDescendants);
@@ -118,7 +131,7 @@ EOriginPivotResult FOriginPivotCore::ValidatePivotEdit(
     {
         // Editor-only visualization (e.g. Anchor billboard) follows its pivot.
         // It is not authored assembly geometry and must not block pivot editing.
-        if (Child->IsVisualizationComponent()) continue;
+        if (IsEditorVisualizationComponent(Child)) continue;
         if (!Child->IsRegistered())
         {
             return Reject(EOriginPivotResult::UnregisteredComponent,
@@ -161,7 +174,7 @@ EOriginPivotResult FOriginPivotCore::SetPivotWorldTransformPreservingChildren(
     DirectChildren.Reserve(DirectAttachedComponents.Num());
     for (USceneComponent* Child : DirectAttachedComponents)
     {
-        if (IsValid(Child) && !Child->IsVisualizationComponent())
+        if (IsValid(Child) && !IsEditorVisualizationComponent(Child))
         {
             FComponentWorldSnapshot Snapshot;
             Snapshot.Component = Child;
@@ -178,7 +191,7 @@ EOriginPivotResult FOriginPivotCore::SetPivotWorldTransformPreservingChildren(
     DescendantSnapshots.Reserve(Descendants.Num());
     for (USceneComponent* Child : Descendants)
     {
-        if (!IsValid(Child) || Child->IsVisualizationComponent()) continue;
+        if (!IsValid(Child) || IsEditorVisualizationComponent(Child)) continue;
         FComponentWorldSnapshot Snapshot;
         Snapshot.Component = Child;
         Snapshot.WorldTransform = Child->GetComponentTransform();

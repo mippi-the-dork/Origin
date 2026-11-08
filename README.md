@@ -1,4 +1,4 @@
-> **Origin 2.0.0-alpha.5.3-hotfix.1 development preview** — Adds named-slot and child-preserving pivot API parity between **Origin Anchors** (Actors) and **Origin Pivot** components. Both use the same slot rules, while Actor and Blueprint SCS hierarchy editing retain their respective Unreal attachment safeguards. A new **Named Pivot Slots** group appears on Anchor Details. Alpha 5.3 includes native parity/robustness tests; Hotfix 1 adds three active-slot deletion regressions and permits returning to Default-only slots without moving geometry. [Alpha 5.3 parity and QA](Doc/ALPHA_5_3_PARITY_AND_ROBUSTNESS.md). The original Alpha 5.3 tests passed in UE 5.8.3; the Hotfix 1 changes require validation.
+> **Origin 2.0.0-alpha.5.4 development preview** — Origin Anchors and Origin Pivot components now share one runtime-safe calculation engine for pivot sources, bounds, child averages and offsets. Origin Anchors gain matching Snap / Align actions; Origin Pivot components gain a Calculated Pivot Source group in Details. Named pivot slots and hierarchy authoring are retained. [Alpha 5.4 technical notes and validation](Doc/ALPHA_5_4_SHARED_CALCULATIONS.md). UE 5.8.3 compilation, native tests and Win64 packaging are pending for this build.
 
 # Origin
 
@@ -1370,3 +1370,9 @@ Compilation corrections to Blueprint preview child reconciliation and the native
 ### Alpha 4.2 reconstruction profiling pass 2
 
 For the balanced synthetic Blueprint reconstruction benchmark and non-destructive selected-Actor Construction Script on/off profiling workflow, see [`Doc/ALPHA_4_2_RECONSTRUCTION_2.md`](Doc/ALPHA_4_2_RECONSTRUCTION_2.md).
+
+
+### Alpha 5.4: Shared calculation parity (development preview)
+
+Origin Anchors and Origin Pivot components now share runtime-safe pivot-source mathematics for bounds, child averages, reference sources, custom/world positions and rotated offsets. The Anchor also has Snap / Align actions, while the Pivot component has a new Calculated Pivot Source section in Details. Component source-rule edits are saved to Default without changing captured named poses; click Recalculate Pivot to apply a valid rule. See [Alpha 5.4 technical notes](Doc/ALPHA_5_4_SHARED_CALCULATIONS.md).
+

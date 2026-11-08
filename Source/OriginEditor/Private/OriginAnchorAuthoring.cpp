@@ -1,5 +1,7 @@
 // Copyright Mippithedork 2026, Inc. All Rights Reserved.
 #include "OriginAnchorAuthoring.h"
+#include "OriginPivotAuthoring.h"
+#include "OriginPivotSnapMath.h"
 
 #include "OriginAnchor.h"
 #include "OriginOperations.h"
@@ -250,6 +252,107 @@ bool FOriginAnchorAuthoring::RunSlotAction(AOriginAnchor* Anchor, EOriginAnchorS
         Transaction.Cancel();
         return false;
     }
+    Anchor->MarkPackageDirty();
+    if (GEditor && Anchor->GetWorld() == GEditor->GetEditorWorldContext().World())
+        GEditor->RedrawLevelEditingViewports();
+    Reason = FText::GetEmpty();
+    return true;
+}
+
+
+bool FOriginAnchorAuthoring::ComputeSnapCandidate(AOriginAnchor* Anchor,
+    EOriginPivotSnapAction Action, FTransform& OutCandidate, FText& Reason)
+{
+    if (!CanAuthor(Anchor, Reason)) return false;
+    USceneComponent* Root = Anchor->GetRootComponent();
+    OutCandidate = Root->GetComponentTransform();
+    const USceneComponent* Parent = Root->GetAttachParent();
+    const FName Socket = Root->GetAttachSocketName();
+    if (Parent && !Socket.IsNone() && !Parent->DoesSocketExist(Socket))
+    {
+        Reason = FText::FromString(TEXT("The Anchor's attachment socket no longer exists."));
+        return false;
+    }
+    const FTransform ParentFrame = Parent
+        ? Parent->GetSocketTransform(Socket, RTS_World) : FTransform::Identity;
+    if (Action == EOriginPivotSnapAction::ParentOrigin)
+        OutCandidate.SetTranslation(ParentFrame.GetLocation());
+    else if (Action == EOriginPivotSnapAction::ParentOrientation)
+        OutCandidate.SetRotation(ParentFrame.GetRotation());
+    else if (Action == EOriginPivotSnapAction::AverageDirectChildren)
+    {
+        FOriginPivotCalculationInput Input;
+        Input.PivotRotation = OutCandidate.GetRotation();
+        for (AActor* Child : Origin::DirectChildren(Anchor))
+            Input.DirectChildOrigins.Add(Child->GetActorLocation());
+        FOriginPivotDefinition Rule;
+        Rule.PositionMode = EOriginPivotMode::AverageChildPivots;
+        FVector Center;
+        FString Error;
+        if (!FOriginPivotSnapMath::CalculatePosition(Rule, Input, Center, Error))
+        { Reason = FText::FromString(Error); return false; }
+        OutCandidate.SetTranslation(Center);
+    }
+    else
+    {
+        Reason = FText::FromString(TEXT("Unsupported Anchor snap action."));
+        return false;
+    }
+    if (!OutCandidate.IsValid() || OutCandidate.ContainsNaN())
+    {
+        Reason = FText::FromString(TEXT("The computed Anchor snap pose is invalid."));
+        return false;
+    }
+    Reason = FText::GetEmpty();
+    return true;
+}
+
+bool FOriginAnchorAuthoring::SnapPivot(AOriginAnchor* Anchor,
+    EOriginPivotSnapAction Action, FText& Reason)
+{
+    FTransform Candidate;
+    if (!ComputeSnapCandidate(Anchor, Action, Candidate, Reason)) return false;
+    USceneComponent* Root = Anchor->GetRootComponent();
+    if (SameWorld(Candidate, Root->GetComponentTransform()))
+    { Reason = FText::GetEmpty(); return true; }
+
+    const bool bStatic = Root->Mobility != EComponentMobility::Movable;
+    if (bStatic)
+    {
+        if (!CanEditStaticAnchor(Anchor, Candidate, Reason)) return false;
+    }
+    else
+    {
+        const EOriginPivotResult Preflight = Anchor->CanSetOriginPivotWorldTransform(Candidate, Reason);
+        if (Preflight != EOriginPivotResult::Success && Preflight != EOriginPivotResult::NoChange)
+            return false;
+    }
+    FScopedTransaction Transaction(NSLOCTEXT("Origin", "AnchorSnap", "Origin: Snap / Align Anchor Pivot"));
+    Anchor->Modify();
+    Root->Modify();
+    TArray<USceneComponent*> Children;
+    Root->GetChildrenComponents(true, Children);
+    TSet<AActor*> Owners;
+    for (USceneComponent* Child : Children) if (IsValid(Child))
+    {
+        Child->Modify();
+        if (AActor* Owner = Child->GetOwner()) Owners.Add(Owner);
+    }
+    for (AActor* Owner : Owners) if (IsValid(Owner)) Owner->Modify();
+
+    const FTransform Before = Root->GetComponentTransform();
+    bool bOK = false;
+    if (bStatic)
+    {
+        bOK = ApplyStaticAnchorPose(Anchor, Candidate, Reason);
+        if (bOK) Anchor->OnOriginPivotChanged.Broadcast(Before, Root->GetComponentTransform());
+    }
+    else
+    {
+        const EOriginPivotResult Result = Anchor->SetOriginPivotWorldTransform(Candidate, Reason);
+        bOK = Result == EOriginPivotResult::Success || Result == EOriginPivotResult::NoChange;
+    }
+    if (!bOK) { Transaction.Cancel(); return false; }
     Anchor->MarkPackageDirty();
     if (GEditor && Anchor->GetWorld() == GEditor->GetEditorWorldContext().World())
         GEditor->RedrawLevelEditingViewports();
