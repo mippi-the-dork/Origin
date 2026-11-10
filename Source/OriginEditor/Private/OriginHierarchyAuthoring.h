@@ -20,6 +20,23 @@ struct FOriginHierarchyAuthoring
     /** Insert a new Origin Pivot immediately above one authored direct child. */
     static bool InsertPivotAboveChild(UOriginPivotComponent* Pivot, FName ChildVariable,
         FName& OutNewPivotVariable, FText& OutReason);
+    /** Atomic batch restructuring of authored direct siblings. One transaction, one Blueprint refresh. */
+    static bool AdoptSiblings(UOriginPivotComponent* Pivot, const TArray<FName>& Variables, FText& OutReason);
+    /** Atomic batch promotion from the pivot to its immediate SCS parent. */
+    static bool PromoteChildren(UOriginPivotComponent* Pivot, const TArray<FName>& Variables, FText& OutReason);
+    /** Detach children from the pivot to the authored Blueprint root (never to a native/inherited root). */
+    static bool DetachChildrenToRoot(UOriginPivotComponent* Pivot, const TArray<FName>& Variables, FText& OutReason);
+    /** Insert ONE shared pivot above several direct children, retaining every child's placement. */
+    static bool InsertSharedPivotAboveChildren(UOriginPivotComponent* Pivot, const TArray<FName>& Variables,
+        FName& OutNewPivotVariable, FText& OutReason);
+    /** Transfer direct authored children between any two compatible Origin Pivots in
+     * the same entirely authored SCS root. Reject cyclic paths, sockets, inherited
+     * frames, unsafe scales, and mixed-invalid batches without mutating the asset.
+     */
+    static bool TransferChildrenToPivot(UOriginPivotComponent* SourcePivot, FName TargetPivotVariable,
+        const TArray<FName>& Variables, FText& OutReason);
+    /** Compatible authored target pivots; actual selections receive full preflight. */
+    static void ListTransferTargets(UOriginPivotComponent* SourcePivot, TArray<FName>& OutTargets);
     /** Read-only options; never modify the asset or its preview. */
     static void ListSiblingsAndChildren(UOriginPivotComponent* Pivot,
         TArray<FName>& OutSiblings, TArray<FName>& OutChildren);

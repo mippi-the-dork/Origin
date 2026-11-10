@@ -1,4 +1,4 @@
-> **Origin 2.0.0-alpha.5.4 development preview** — Origin Anchors and Origin Pivot components now share one runtime-safe calculation engine for pivot sources, bounds, child averages and offsets. Origin Anchors gain matching Snap / Align actions; Origin Pivot components gain a Calculated Pivot Source group in Details. Named pivot slots and hierarchy authoring are retained. [Alpha 5.4 technical notes and validation](Doc/ALPHA_5_4_SHARED_CALCULATIONS.md). UE 5.8.3 compilation, native tests and Win64 packaging are pending for this build.
+> **Origin 2.0.0-alpha.5.6 development preview** — New cross-pivot Blueprint component transfers preserve complete branches through a shared authored SCS root, with cycle/socket/inheritance/scale preflight and single Undo transactions. Multi-select menus now stay open while checking components and offer Select All/Clear. A new `Origin.Tests.Regression` Output Log command runs all native Origin correctness tests in one invocation. Alpha 5.5 passed 75/75 scoped tests and Win64 packaging; Alpha 5.6 requires fresh UE 5.8.3 compilation, automation, manual checks and Win64 packaging. [Alpha 5.6 technical notes](Doc/ALPHA_5_6_CROSS_PIVOT_TRANSFER.md).
 
 # Origin
 
@@ -40,6 +40,16 @@ Create a dedicated transform parent above selected Actors while preserving their
 ### Level Editor Hierarchy Authoring (Alpha 5.2)
 
 Insert an Origin Anchor above an Actor, reparent selected Actors into an Anchor, promote direct children to the Anchor's parent, or detach children to the level root. Existing world transforms and nested attachments are preserved by validated structural transactions. Use the **Origin** submenu on the Actor/Outliner context menu. See the [Alpha 5.2 guide](Doc/ALPHA_5_2_ACTOR_ASSEMBLIES.md) for restrictions, including unsupported World Partition restructuring.
+
+### Blueprint Cross-Pivot Branch Transfers (Alpha 5.6)
+
+The **Multi-Component Hierarchy Authoring** section now lets you select direct children, pick another authored **Transfer Destination Pivot**, and use **Transfer Selected Children To Pivot**. The target may be in a different branch or nested elsewhere in the same authored Blueprint root; the entire subtree stays in place. Unsafe cyclic, inherited/native-root, socket-dependent, absolute-axis and nonuniform-scale paths fail without moving any component. The multi-selection menus remain open while selecting several checkboxes and offer **Select All Eligible** / **Clear Selection**. [Alpha 5.6 design and tests](Doc/ALPHA_5_6_CROSS_PIVOT_TRANSFER.md).
+
+Run the functional native regression tests in one Output Log command: `Origin.Tests.Regression`. This covers all current `Origin.Runtime.*`, `Origin.Editor.*` and `Origin.Migration.*` tests; performance benchmarks remain a separate opt-in suite.
+
+### Blueprint Multi-Component Hierarchy Authoring (Alpha 5.5)
+
+In an authored Blueprint, the **Origin Pivot Component Details → Multi-Component Hierarchy Authoring** group supports batch reparenting of siblings, promoting/detaching child components, and inserting one shared pivot for multiple child branches. All batch operations preserve authored placement, reject mixed invalid selections before editing, and use a single native Undo transaction. Detach goes to the **authored Blueprint root**, not outside the owning Actor. Inherited/native and socket-attached component reparenting remain conservatively unsupported. See the [Alpha 5.5 guide](Doc/ALPHA_5_5_BLUEPRINT_BATCH_HIERARCHY.md).
 
 ### Adjustable Assembly Pivots
 

@@ -29,6 +29,33 @@
 #include "Textures/SlateIcon.h"
 #include "Interfaces/IPluginManager.h"
 #include "Misc/Paths.h"
+#include "Engine/Engine.h"
+#include "HAL/IConsoleManager.h"
+
+// Keep the command filter scoped to Origin's own test paths: plain
+// "Automation RunTests Origin" can match unrelated engine test names that
+// contain the word Origin. Performance benchmarks are deliberately separate
+// from the ordinary correctness regression gate.
+namespace
+{
+    void RunOriginRegression()
+    {
+        if (!GEditor || !GEngine || GEditor->PlayWorld)
+        {
+            UE_LOG(LogTemp, Warning, TEXT("Origin regression requires an idle Unreal Editor (not PIE)."));
+            return;
+        }
+        static const TCHAR* OriginRegressionTests =
+            TEXT("Automation RunTests Origin.Runtime+Origin.Editor+Origin.Migration");
+        UE_LOG(LogTemp, Display, TEXT("Origin.Tests.Regression: scheduling all Origin runtime, editor, and migration automation tests."));
+        GEngine->Exec(GEditor->GetEditorWorldContext().World(), OriginRegressionTests);
+    }
+
+    FAutoConsoleCommand OriginRegressionConsoleCommand(
+        TEXT("Origin.Tests.Regression"),
+        TEXT("Runs every registered Origin.Runtime.*, Origin.Editor.* and Origin.Migration.* native automation test. Excludes longer performance benchmarks and unrelated engine tests."),
+        FConsoleCommandDelegate::CreateStatic(&RunOriginRegression));
+}
 
 class FOriginCommands : public TCommands<FOriginCommands>
 {

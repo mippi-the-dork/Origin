@@ -53,7 +53,7 @@ namespace
         }
     }
 
-    struct FOriginPivotEditState
+    struct FOriginPivotEditState : public TSharedFromThis<FOriginPivotEditState>
     {
         TWeakObjectPtr<UOriginPivotComponent> Component;
         FVector TranslationDelta = FVector::ZeroVector;
@@ -65,6 +65,11 @@ namespace
         TWeakPtr<SComboBox<TSharedPtr<FName>>> SlotCombo;
         FName SelectedSibling = NAME_None;
         FName SelectedChild = NAME_None;
+        FName SelectedTransferTarget = NAME_None;
+        TArray<TSharedPtr<FName>> TransferTargetOptions;
+        TWeakPtr<SComboBox<TSharedPtr<FName>>> TransferTargetCombo;
+        TSet<FName> BatchSiblings;
+        TSet<FName> BatchChildren;
         TArray<TSharedPtr<FName>> SiblingOptions;
         TArray<TSharedPtr<FName>> ChildOptions;
         TWeakPtr<SComboBox<TSharedPtr<FName>>> SiblingCombo;
@@ -72,18 +77,28 @@ namespace
 
         void RefreshHierarchyChoices()
         {
-            TArray<FName> Siblings, Children;
+            TArray<FName> Siblings, Children, Targets;
             FOriginHierarchyAuthoring::ListSiblingsAndChildren(Component.Get(), Siblings, Children);
+            FOriginHierarchyAuthoring::ListTransferTargets(Component.Get(), Targets);
             SiblingOptions.Reset();
             ChildOptions.Reset();
+            TransferTargetOptions.Reset();
             for (FName Name : Siblings) SiblingOptions.Add(MakeShared<FName>(Name));
             for (FName Name : Children) ChildOptions.Add(MakeShared<FName>(Name));
+            for (FName Name : Targets) TransferTargetOptions.Add(MakeShared<FName>(Name));
+            if (!Targets.Contains(SelectedTransferTarget))
+                SelectedTransferTarget = Targets.IsEmpty() ? NAME_None : Targets[0];
             if (!Siblings.Contains(SelectedSibling))
                 SelectedSibling = Siblings.IsEmpty() ? NAME_None : Siblings[0];
             if (!Children.Contains(SelectedChild))
                 SelectedChild = Children.IsEmpty() ? NAME_None : Children[0];
+            for (auto It = BatchSiblings.CreateIterator(); It; ++It)
+                if (!Siblings.Contains(*It)) It.RemoveCurrent();
+            for (auto It = BatchChildren.CreateIterator(); It; ++It)
+                if (!Children.Contains(*It)) It.RemoveCurrent();
             if (auto Combo = SiblingCombo.Pin()) Combo->RefreshOptions();
             if (auto Combo = ChildCombo.Pin()) Combo->RefreshOptions();
+            if (auto Combo = TransferTargetCombo.Pin()) Combo->RefreshOptions();
         }
 
         FReply Restructure(int32 Action)
@@ -110,6 +125,96 @@ namespace
             return FReply::Handled();
         }
 
+
+        TSharedRef<SWidget> MakeBatchSelectionMenu(bool bSiblings)
+        {
+            // Menu entries may outlive a Details rebuild. Never capture a raw
+            // authoring-state pointer in a deferred Slate menu delegate.
+            const TWeakPtr<FOriginPivotEditState> WeakSelf = AsShared();
+            // Keep the menu open for multi-select; menu should only close when
+            // the user clicks away, not after checking each component.
+            FMenuBuilder Menu(false, nullptr);
+            const TArray<TSharedPtr<FName>>& Options = bSiblings ? SiblingOptions : ChildOptions;
+            Menu.AddMenuEntry(LOCTEXT("BatchSelectAll", "Select All Eligible"),
+                LOCTEXT("BatchSelectAllTip", "Include every currently eligible authored component."),
+                FSlateIcon(), FUIAction(FExecuteAction::CreateLambda([WeakSelf, bSiblings]
+                {
+                    if (const TSharedPtr<FOriginPivotEditState> State = WeakSelf.Pin())
+                    {
+                        TSet<FName>& Selection = bSiblings ? State->BatchSiblings : State->BatchChildren;
+                        const auto& Candidates = bSiblings ? State->SiblingOptions : State->ChildOptions;
+                        for (const TSharedPtr<FName>& Candidate : Candidates)
+                            if (Candidate.IsValid()) Selection.Add(*Candidate);
+                    }
+                })));
+            Menu.AddMenuEntry(LOCTEXT("BatchClearAll", "Clear Selection"),
+                LOCTEXT("BatchClearAllTip", "Remove every component from the current batch selection."),
+                FSlateIcon(), FUIAction(FExecuteAction::CreateLambda([WeakSelf, bSiblings]
+                {
+                    if (const TSharedPtr<FOriginPivotEditState> State = WeakSelf.Pin())
+                        (bSiblings ? State->BatchSiblings : State->BatchChildren).Reset();
+                })));
+            Menu.AddMenuSeparator();
+            for (const TSharedPtr<FName>& Option : Options)
+            {
+                if (!Option.IsValid()) continue;
+                const FName Name = *Option;
+                Menu.AddMenuEntry(FText::FromName(Name),
+                    LOCTEXT("BatchChooseTip", "Toggle this authored component in the atomic batch operation."),
+                    FSlateIcon(), FUIAction(
+                        FExecuteAction::CreateLambda([WeakSelf, bSiblings, Name]
+                        {
+                            if (const TSharedPtr<FOriginPivotEditState> State = WeakSelf.Pin())
+                            {
+                                TSet<FName>& Selected = bSiblings ? State->BatchSiblings : State->BatchChildren;
+                                if (Selected.Contains(Name)) Selected.Remove(Name);
+                                else Selected.Add(Name);
+                            }
+                        }),
+                        FCanExecuteAction(),
+                        FIsActionChecked::CreateLambda([WeakSelf, bSiblings, Name]
+                        {
+                            if (const TSharedPtr<FOriginPivotEditState> State = WeakSelf.Pin())
+                                return (bSiblings ? State->BatchSiblings : State->BatchChildren).Contains(Name);
+                            return false;
+                        })), NAME_None, EUserInterfaceActionType::ToggleButton);
+            }
+            return Menu.MakeWidget();
+        }
+
+        FReply BatchRestructure(int32 Action)
+        {
+            UOriginPivotComponent* Pivot = Component.Get();
+            FText Reason;
+            TArray<FName> Names = (Action == 0 ? BatchSiblings : BatchChildren).Array();
+            Names.Sort([](FName A, FName B) { return A.LexicalLess(B); });
+            bool bOk = false;
+            if (Action == 0)
+                bOk = FOriginHierarchyAuthoring::AdoptSiblings(Pivot, Names, Reason);
+            else if (Action == 1)
+                bOk = FOriginHierarchyAuthoring::PromoteChildren(Pivot, Names, Reason);
+            else if (Action == 2)
+                bOk = FOriginHierarchyAuthoring::DetachChildrenToRoot(Pivot, Names, Reason);
+            else if (Action == 3)
+            {
+                FName NewVariable;
+                bOk = FOriginHierarchyAuthoring::InsertSharedPivotAboveChildren(
+                    Pivot, Names, NewVariable, Reason);
+            }
+            else if (Action == 4)
+                bOk = FOriginHierarchyAuthoring::TransferChildrenToPivot(
+                    Pivot, SelectedTransferTarget, Names, Reason);
+            if (!bOk)
+                Origin::Notify(Reason.IsEmpty()
+                    ? LOCTEXT("BatchSelectionRequired", "Select at least one eligible authored component.") : Reason);
+            else
+            {
+                BatchSiblings.Reset();
+                BatchChildren.Reset();
+                RefreshHierarchyChoices();
+            }
+            return FReply::Handled();
+        }
 
         void RefreshSlots()
         {
@@ -760,6 +865,95 @@ void FOriginPivotComponentDetails::CustomizeDetails(IDetailLayoutBuilder& Builde
                     .ToolTipText(LOCTEXT("InsertPivotTip", "Create a new Origin Pivot directly between the selected child and this pivot. Place the new pivot at the child's origin without moving the branch."))
                     .IsEnabled_Lambda([State] { return FOriginHierarchyAuthoring::CanEdit(State->Component.Get()) && !State->SelectedChild.IsNone(); })
                     .OnClicked_Lambda([State] { return State->Restructure(2); })]];
+    }
+
+    if (FOriginHierarchyAuthoring::CanEdit(State->Component.Get()))
+    {
+        TSharedPtr<SComboBox<TSharedPtr<FName>>> TransferSelector;
+        IDetailGroup& Batch = Category.AddGroup(TEXT("OriginHierarchyBatch"),
+            LOCTEXT("BatchAuthoringGroup", "Multi-Component Hierarchy Authoring"), false, true);
+        Batch.AddWidgetRow().WholeRowContent()
+            [SNew(STextBlock)
+                .Text(LOCTEXT("BatchHelp", "Choose multiple authored SCS components. Every selected component must be valid; each operation applies as one Undo step or changes nothing. Detach moves components to the authored Blueprint root, not out of the Actor."))
+                .AutoWrapText(true)];
+        Batch.AddWidgetRow()
+            .NameContent()[SNew(STextBlock).Text(LOCTEXT("BatchSiblingLabel", "Siblings To Reparent"))]
+            .ValueContent().MinDesiredWidth(230.0f)
+            [SNew(SComboButton)
+                .OnGetMenuContent_Lambda([State] { return State->MakeBatchSelectionMenu(true); })
+                .ButtonContent()[SNew(STextBlock).Text_Lambda([State]
+                {
+                    return FText::Format(LOCTEXT("BatchSiblingsCount", "{0} selected"),
+                        FText::AsNumber(State->BatchSiblings.Num()));
+                })]];
+        Batch.AddWidgetRow().WholeRowContent()
+            [SNew(SButton)
+                .Text(LOCTEXT("BatchReparent", "Reparent Selected Siblings To This Pivot"))
+                .ToolTipText(LOCTEXT("BatchReparentTip", "Move all selected direct siblings beneath this Pivot, preserving every branch, in one Undo step."))
+                .IsEnabled_Lambda([State] { return !State->BatchSiblings.IsEmpty() &&
+                    FOriginHierarchyAuthoring::CanEdit(State->Component.Get()); })
+                .OnClicked_Lambda([State] { return State->BatchRestructure(0); })];
+        Batch.AddWidgetRow()
+            .NameContent()[SNew(STextBlock).Text(LOCTEXT("BatchChildLabel", "Children To Restructure"))]
+            .ValueContent().MinDesiredWidth(230.0f)
+            [SNew(SComboButton)
+                .OnGetMenuContent_Lambda([State] { return State->MakeBatchSelectionMenu(false); })
+                .ButtonContent()[SNew(STextBlock).Text_Lambda([State]
+                {
+                    return FText::Format(LOCTEXT("BatchChildrenCount", "{0} selected"),
+                        FText::AsNumber(State->BatchChildren.Num()));
+                })]];
+        Batch.AddWidgetRow().WholeRowContent()
+            [SNew(SHorizontalBox)
+                + SHorizontalBox::Slot().FillWidth(1).Padding(0, 2, 4, 2)
+                [SNew(SButton)
+                    .Text(LOCTEXT("BatchPromote", "Promote Selected"))
+                    .ToolTipText(LOCTEXT("BatchPromoteTip", "Move all selected direct children to this Pivot's parent, retaining their world placement."))
+                    .IsEnabled_Lambda([State] { return !State->BatchChildren.IsEmpty() &&
+                        FOriginHierarchyAuthoring::CanEdit(State->Component.Get()); })
+                    .OnClicked_Lambda([State] { return State->BatchRestructure(1); })]
+                + SHorizontalBox::Slot().FillWidth(1).Padding(0, 2, 0, 2)
+                [SNew(SButton)
+                    .Text(LOCTEXT("BatchInsertShared", "Insert Shared Pivot"))
+                    .ToolTipText(LOCTEXT("BatchInsertSharedTip", "Insert one new Pivot above all selected direct children, at their average authored origin."))
+                    .IsEnabled_Lambda([State] { return !State->BatchChildren.IsEmpty() &&
+                        FOriginHierarchyAuthoring::CanEdit(State->Component.Get()); })
+                    .OnClicked_Lambda([State] { return State->BatchRestructure(3); })]];
+        Batch.AddWidgetRow()
+            .NameContent()[SNew(STextBlock).Text(LOCTEXT("TransferTargetLabel", "Transfer Destination Pivot"))]
+            .ValueContent().MinDesiredWidth(230.0f)
+            [SAssignNew(TransferSelector, SComboBox<TSharedPtr<FName>>)
+                .OptionsSource(&State->TransferTargetOptions)
+                .OnGenerateWidget_Lambda([](TSharedPtr<FName> Name) -> TSharedRef<SWidget>
+                {
+                    return SNew(STextBlock).Text(Name.IsValid() ? FText::FromName(*Name) : FText::GetEmpty());
+                })
+                .OnSelectionChanged_Lambda([State](TSharedPtr<FName> Name, ESelectInfo::Type)
+                {
+                    if (Name.IsValid()) State->SelectedTransferTarget = *Name;
+                })
+                .Content()[SNew(STextBlock).Text_Lambda([State]
+                {
+                    return State->SelectedTransferTarget.IsNone()
+                        ? LOCTEXT("NoTransferTarget", "No compatible Pivot")
+                        : FText::FromName(State->SelectedTransferTarget);
+                })]];
+        State->TransferTargetCombo = TransferSelector;
+        Batch.AddWidgetRow().WholeRowContent()
+            [SNew(SButton)
+                .Text(LOCTEXT("BatchTransfer", "Transfer Selected Children To Pivot"))
+                .ToolTipText(LOCTEXT("BatchTransferTip", "Move selected direct children to another authored Origin Pivot in this Blueprint. Keeps complete branches in place, rejects cycles, sockets and unsafe inherited transforms, and performs one Undo transaction."))
+                .IsEnabled_Lambda([State] { return !State->BatchChildren.IsEmpty() &&
+                    !State->SelectedTransferTarget.IsNone() &&
+                    FOriginHierarchyAuthoring::CanEdit(State->Component.Get()); })
+                .OnClicked_Lambda([State] { return State->BatchRestructure(4); })];
+        Batch.AddWidgetRow().WholeRowContent()
+            [SNew(SButton)
+                .Text(LOCTEXT("BatchDetachToRoot", "Detach Selected Children To Blueprint Root"))
+                .ToolTipText(LOCTEXT("BatchDetachTip", "Move selected direct children under the authored Blueprint scene root, without moving them in the Actor. Rejects inherited, socket or absolute-transform paths."))
+                .IsEnabled_Lambda([State] { return !State->BatchChildren.IsEmpty() &&
+                    FOriginHierarchyAuthoring::CanEdit(State->Component.Get()); })
+                .OnClicked_Lambda([State] { return State->BatchRestructure(2); })];
     }
 
     Category.AddCustomRow(LOCTEXT("PivotDescriptionSearch", "Pivot help"))
