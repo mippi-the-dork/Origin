@@ -460,10 +460,11 @@ namespace
         FTransform NewParentInCommonFrame;
     };
 
-    /** Resolve any authored SCS node into its common authored root frame. The
-     * root is treated as identity. An authored root attached to a native or
-     * inherited component is intentionally unsupported, since that component's
-     * socket/transform is outside the local SCS calculation graph.
+    /** Resolve an authored SCS node into its common local authored root frame.
+     * The root is treated as identity, and the root ITSELF is never moved.
+     * Its attachment to an inherited or native parent therefore cancels out
+     * for operations entirely inside the same authored root. We still reject
+     * socket-dependent or absolute paths BELOW that root and cross-root moves.
      */
     bool BuildAuthoredRootFrame(const FContext& Context, USCS_Node* StartingNode,
         USCS_Node*& OutRoot, FTransform& OutNodeInRoot, FText& Reason)
@@ -480,10 +481,10 @@ namespace
             USCS_Node* Parent = Context.SCS->FindParentNode(Current);
             if (!IsValid(Parent))
             {
-                if (!Context.SCS->GetRootNodes().Contains(Current) ||
-                    Current->bIsParentComponentNative ||
-                    !Current->ParentComponentOrVariableName.IsNone() ||
-                    !Current->ParentComponentOwnerClassName.IsNone()) break;
+                if (!Context.SCS->GetRootNodes().Contains(Current)) break;
+                // Root attachment metadata belongs to the unchanged outer
+                // frame. It must not be overwritten or used to compensate
+                // transforms within this common authored-root coordinate frame.
                 OutRoot = Current;
                 return true;
             }
@@ -499,7 +500,7 @@ namespace
             OutNodeInRoot = OutNodeInRoot * Template->GetRelativeTransform();
             Current = Parent;
         }
-        Reason = LOCTEXT("UnsupportedRootPath", "The operation requires an entirely authored, socket-free hierarchy with safe relative transforms leading to the same Blueprint scene root.");
+        Reason = LOCTEXT("UnsupportedRootPath", "The operation requires a common authored Blueprint scene root and safe socket-free transforms below that root. Inherited/native components cannot be moved directly.");
         return false;
     }
 
@@ -773,6 +774,31 @@ void FOriginHierarchyAuthoring::ListTransferTargets(UOriginPivotComponent* Sourc
             OutTargets.Add(Candidate->GetVariableName());
     }
     OutTargets.Sort([](const FName& A, const FName& B) { return A.LexicalLess(B); });
+}
+
+void FOriginHierarchyAuthoring::ListTransferTargetsForChildren(UOriginPivotComponent* SourcePivot,
+    const TArray<FName>& SelectedVariables, TArray<FName>& OutTargets)
+{
+    // Discover the same candidates as before. Only selected children impose
+    // additional constraints: showing a target that would certainly fail its
+    // cycle/transform preflight makes the authoring UI unnecessarily confusing.
+    ListTransferTargets(SourcePivot, OutTargets);
+    if (SelectedVariables.IsEmpty() || OutTargets.IsEmpty()) return;
+
+    FContext Context;
+    FText Reason;
+    if (!ResolveContext(SourcePivot, Context, Reason))
+    {
+        OutTargets.Reset();
+        return;
+    }
+    OutTargets.RemoveAll([&](const FName TargetName)
+    {
+        USCS_Node* Target = Context.SCS->FindSCSNode(TargetName);
+        TArray<FOriginBatchMove> Plan;
+        FText PreflightReason;
+        return !BuildTransferMoves(Context, Target, SelectedVariables, Plan, PreflightReason);
+    });
 }
 
 bool FOriginHierarchyAuthoring::TransferChildrenToPivot(UOriginPivotComponent* SourcePivot,

@@ -75,19 +75,27 @@ namespace
         TWeakPtr<SComboBox<TSharedPtr<FName>>> SiblingCombo;
         TWeakPtr<SComboBox<TSharedPtr<FName>>> ChildCombo;
 
-        void RefreshHierarchyChoices()
+        void RefreshTransferTargetChoices()
         {
-            TArray<FName> Siblings, Children, Targets;
-            FOriginHierarchyAuthoring::ListSiblingsAndChildren(Component.Get(), Siblings, Children);
-            FOriginHierarchyAuthoring::ListTransferTargets(Component.Get(), Targets);
-            SiblingOptions.Reset();
-            ChildOptions.Reset();
+            TArray<FName> Selected = BatchChildren.Array();
+            Selected.Sort([](FName A, FName B) { return A.LexicalLess(B); });
+            TArray<FName> Targets;
+            FOriginHierarchyAuthoring::ListTransferTargetsForChildren(Component.Get(), Selected, Targets);
             TransferTargetOptions.Reset();
-            for (FName Name : Siblings) SiblingOptions.Add(MakeShared<FName>(Name));
-            for (FName Name : Children) ChildOptions.Add(MakeShared<FName>(Name));
             for (FName Name : Targets) TransferTargetOptions.Add(MakeShared<FName>(Name));
             if (!Targets.Contains(SelectedTransferTarget))
                 SelectedTransferTarget = Targets.IsEmpty() ? NAME_None : Targets[0];
+            if (auto Combo = TransferTargetCombo.Pin()) Combo->RefreshOptions();
+        }
+
+        void RefreshHierarchyChoices()
+        {
+            TArray<FName> Siblings, Children;
+            FOriginHierarchyAuthoring::ListSiblingsAndChildren(Component.Get(), Siblings, Children);
+            SiblingOptions.Reset();
+            ChildOptions.Reset();
+            for (FName Name : Siblings) SiblingOptions.Add(MakeShared<FName>(Name));
+            for (FName Name : Children) ChildOptions.Add(MakeShared<FName>(Name));
             if (!Siblings.Contains(SelectedSibling))
                 SelectedSibling = Siblings.IsEmpty() ? NAME_None : Siblings[0];
             if (!Children.Contains(SelectedChild))
@@ -98,7 +106,7 @@ namespace
                 if (!Children.Contains(*It)) It.RemoveCurrent();
             if (auto Combo = SiblingCombo.Pin()) Combo->RefreshOptions();
             if (auto Combo = ChildCombo.Pin()) Combo->RefreshOptions();
-            if (auto Combo = TransferTargetCombo.Pin()) Combo->RefreshOptions();
+            RefreshTransferTargetChoices();
         }
 
         FReply Restructure(int32 Action)
@@ -145,6 +153,7 @@ namespace
                         const auto& Candidates = bSiblings ? State->SiblingOptions : State->ChildOptions;
                         for (const TSharedPtr<FName>& Candidate : Candidates)
                             if (Candidate.IsValid()) Selection.Add(*Candidate);
+                        if (!bSiblings) State->RefreshTransferTargetChoices();
                     }
                 })));
             Menu.AddMenuEntry(LOCTEXT("BatchClearAll", "Clear Selection"),
@@ -152,7 +161,10 @@ namespace
                 FSlateIcon(), FUIAction(FExecuteAction::CreateLambda([WeakSelf, bSiblings]
                 {
                     if (const TSharedPtr<FOriginPivotEditState> State = WeakSelf.Pin())
+                    {
                         (bSiblings ? State->BatchSiblings : State->BatchChildren).Reset();
+                        if (!bSiblings) State->RefreshTransferTargetChoices();
+                    }
                 })));
             Menu.AddMenuSeparator();
             for (const TSharedPtr<FName>& Option : Options)
@@ -169,6 +181,7 @@ namespace
                                 TSet<FName>& Selected = bSiblings ? State->BatchSiblings : State->BatchChildren;
                                 if (Selected.Contains(Name)) Selected.Remove(Name);
                                 else Selected.Add(Name);
+                                if (!bSiblings) State->RefreshTransferTargetChoices();
                             }
                         }),
                         FCanExecuteAction(),

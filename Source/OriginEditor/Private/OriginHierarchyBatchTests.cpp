@@ -15,6 +15,11 @@
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/AutomationTest.h"
 #include "Misc/Guid.h"
+#include "Misc/PackageName.h"
+#include "Misc/Paths.h"
+#include "HAL/FileManager.h"
+#include "UObject/SavePackage.h"
+#include "UObject/PackageReload.h"
 #include "UObject/Package.h"
 #include "UObject/StrongObjectPtr.h"
 
@@ -30,13 +35,15 @@ namespace
     struct FBatchFixture
     {
         TStrongObjectPtr<UBlueprint> Blueprint;
-        bool Build(FAutomationTestBase& Test, bool bTransactional = false)
+        bool Build(FAutomationTestBase& Test, bool bTransactional = false,
+            UPackage* ExplicitPackage = nullptr, FName ExplicitAssetName = NAME_None)
         {
-            UPackage* Package = bTransactional
+            UPackage* Package = ExplicitPackage ? ExplicitPackage : (bTransactional
                 ? CreatePackage(*FString::Printf(TEXT("/Temp/OriginBatchUndo_%s"),
-                    *FGuid::NewGuid().ToString(EGuidFormats::Digits))) : GetTransientPackage();
-            const FName BPName(*FString::Printf(TEXT("OriginBatchQA_%s"),
-                *FGuid::NewGuid().ToString(EGuidFormats::Digits)));
+                    *FGuid::NewGuid().ToString(EGuidFormats::Digits))) : GetTransientPackage());
+            const FName BPName = ExplicitAssetName.IsNone()
+                ? FName(*FString::Printf(TEXT("OriginBatchQA_%s"),
+                    *FGuid::NewGuid().ToString(EGuidFormats::Digits))) : ExplicitAssetName;
             Blueprint.Reset(FKismetEditorUtilities::CreateBlueprint(AActor::StaticClass(), Package,
                 BPName, BPTYPE_Normal, TEXT("OriginBatchHierarchyTests")));
             if (!Test.TestNotNull(TEXT("Blueprint fixture"), Blueprint.Get())) return false;
@@ -444,22 +451,32 @@ bool FOriginBatchUndoShared::RunTest(const FString& Parameters)
 }
 
 
-BATCH_TEST(FOriginBatchRejectInheritedRoot, "Origin.Editor.Hierarchy.Blueprint.Batch.InheritedRootDetachRejectsAtomically")
-bool FOriginBatchRejectInheritedRoot::RunTest(const FString& Parameters)
+BATCH_TEST(FOriginBatchNativeAttachedRoot, "Origin.Editor.Hierarchy.Blueprint.Batch.NativeAttachedRootDetachPreservesBranch")
+bool FOriginBatchNativeAttachedRoot::RunTest(const FString& Parameters)
 {
     FBatchFixture F;
     if (!F.Build(*this)) return false;
     USCS_Node* Root = F.Node(TEXT("Root"));
     if (!TestNotNull(TEXT("Authored scene root"), Root)) return false;
-    Root->bIsParentComponentNative = true; // Emulate an SCS root bound to a native parent.
+    // The authored root is bound to a native parent; only its children move.
+    Root->bIsParentComponentNative = true;
     Root->ParentComponentOrVariableName = TEXT("NativeSceneRoot");
+    Root->AttachToName = TEXT("RootSocket");
     const FTransform Before = F.InRoot(TEXT("InnerChild"));
+    const FTransform OuterBefore = F.InRoot(TEXT("Outer"));
     FText Reason;
-    TestFalse(TEXT("Reject detach through native parent reference"),
+    if (!TestTrue(TEXT("Detach within authored subtree beneath native/socket root"),
         FOriginHierarchyAuthoring::DetachChildrenToRoot(F.Pivot(TEXT("Inner")),
-            Names({TEXT("InnerChild")}), Reason));
-    TestTrue(TEXT("Parent remains nested"), F.IsUnder(TEXT("InnerChild"), TEXT("Inner")));
-    TestTrue(TEXT("Transform remains unchanged"), F.InRoot(TEXT("InnerChild")).Equals(Before, 1.e-3));
+            Names({TEXT("InnerChild")}), Reason)))
+    { AddError(Reason.ToString()); return false; }
+    TestTrue(TEXT("Child now directly under unchanged authored root"),
+        F.IsUnder(TEXT("InnerChild"), TEXT("Root")));
+    TestTrue(TEXT("Child transform preserved in common root frame"),
+        F.InRoot(TEXT("InnerChild")).Equals(Before, 1.e-3));
+    TestTrue(TEXT("Unselected pivot remains stationary"), F.InRoot(TEXT("Outer")).Equals(OuterBefore, 1.e-3));
+    TestTrue(TEXT("Native parent and root socket metadata not touched"),
+        Root->bIsParentComponentNative && Root->ParentComponentOrVariableName == TEXT("NativeSceneRoot") &&
+        Root->AttachToName == TEXT("RootSocket"));
     return true;
 }
 
@@ -683,21 +700,53 @@ bool FOriginTransferSocket::RunTest(const FString& Parameters)
     return true;
 }
 
-BATCH_TEST(FOriginTransferInherited, "Origin.Editor.Hierarchy.Blueprint.Transfer.InheritedRootRejectsAtomically")
-bool FOriginTransferInherited::RunTest(const FString& Parameters)
+BATCH_TEST(FOriginTransferNativeAttachedRoot, "Origin.Editor.Hierarchy.Blueprint.Transfer.NativeAttachedRootPreservesBranches")
+bool FOriginTransferNativeAttachedRoot::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!F.Build(*this)) return false;
+    USCS_Node* Root = F.Node(TEXT("Root"));
+    if (!TestNotNull(TEXT("Authored scene root"), Root)) return false;
+    Root->bIsParentComponentNative = true;
+    Root->ParentComponentOrVariableName = TEXT("NativeSceneRoot");
+    Root->ParentComponentOwnerClassName = TEXT("NativeFixtureClass");
+    Root->AttachToName = TEXT("NativeSocket");
+    const FTransform Before = F.InRoot(TEXT("Grandchild"));
+    const FTransform BeforeC = F.InRoot(TEXT("ChildC"));
+    FText Reason;
+    if (!TestTrue(TEXT("Move only descendants sharing unchanged authored root"),
+        FOriginHierarchyAuthoring::TransferChildrenToPivot(F.Pivot(), TEXT("Inner"),
+            Names({TEXT("ChildA")}), Reason)))
+    { AddError(Reason.ToString()); return false; }
+    TestTrue(TEXT("Branch moved under nested pivot"), F.IsUnder(TEXT("ChildA"), TEXT("Inner")));
+    TestTrue(TEXT("Descendant retains placement relative to authored root"),
+        F.InRoot(TEXT("Grandchild")).Equals(Before, 1.e-3));
+    TestTrue(TEXT("Unselected branch untouched"), F.InRoot(TEXT("ChildC")).Equals(BeforeC, 1.e-3));
+    TestTrue(TEXT("External root attachment unchanged"), Root->bIsParentComponentNative &&
+        Root->ParentComponentOrVariableName == TEXT("NativeSceneRoot") &&
+        Root->ParentComponentOwnerClassName == TEXT("NativeFixtureClass") &&
+        Root->AttachToName == TEXT("NativeSocket"));
+    return true;
+}
+
+BATCH_TEST(FOriginTransferNativeRootSocketBelow, "Origin.Editor.Hierarchy.Blueprint.Transfer.NativeRootDoesNotAllowChildSocketPath")
+bool FOriginTransferNativeRootSocketBelow::RunTest(const FString& Parameters)
 {
     FBatchFixture F;
     if (!F.Build(*this)) return false;
     USCS_Node* Root = F.Node(TEXT("Root"));
     Root->bIsParentComponentNative = true;
-    Root->ParentComponentOrVariableName = TEXT("NativeSceneRoot");
-    const FTransform A = F.Relative(TEXT("ChildA"));
+    Root->ParentComponentOrVariableName = TEXT("NativeParent");
+    F.Node(TEXT("Inner"))->AttachToName = TEXT("SocketBelowRoot");
+    const FTransform Before = F.InRoot(TEXT("ChildA"));
     FText Reason;
-    TestFalse(TEXT("Native attached authored root unsupported"),
+    TestFalse(TEXT("Socket-dependent frame below the shared root remains unsupported"),
         FOriginHierarchyAuthoring::TransferChildrenToPivot(F.Pivot(), TEXT("Inner"),
             Names({TEXT("ChildA")}), Reason));
-    TestTrue(TEXT("No mutation"), F.IsUnder(TEXT("ChildA"), TEXT("Outer")) &&
-        F.Relative(TEXT("ChildA")).Equals(A, 1.e-3));
+    TestTrue(TEXT("Failed operation is atomic"), F.IsUnder(TEXT("ChildA"), TEXT("Outer")) &&
+        F.InRoot(TEXT("ChildA")).Equals(Before, 1.e-3));
+    TestTrue(TEXT("Original native parent metadata remains"),
+        Root->ParentComponentOrVariableName == TEXT("NativeParent"));
     return true;
 }
 
@@ -740,6 +789,87 @@ bool FOriginTransferCompile::RunTest(const FString& Parameters)
     return true;
 }
 
+BATCH_TEST(FOriginTransferTargetFilterCycle, "Origin.Editor.Hierarchy.Blueprint.Transfer.SelectionTargetsHideDescendantCycles")
+bool FOriginTransferTargetFilterCycle::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!F.Build(*this) || !TestNotNull(TEXT("Pivot within selected branch"),
+        AddTransferTarget(F, TEXT("BranchPivot"), TEXT("ChildA")))) return false;
+    const FTransform Before = F.InRoot(TEXT("Grandchild"));
+    TArray<FName> Candidates;
+    FOriginHierarchyAuthoring::ListTransferTargetsForChildren(F.Pivot(),
+        Names({TEXT("ChildA")}), Candidates);
+    TestFalse(TEXT("Selected branch may not be reparented below its own descendant"),
+        Candidates.Contains(TEXT("BranchPivot")));
+    TestTrue(TEXT("Non-cyclic nested pivot remains eligible"), Candidates.Contains(TEXT("Inner")));
+    TestTrue(TEXT("Discovery must not move nodes"), F.IsUnder(TEXT("ChildA"), TEXT("Outer")) &&
+        F.InRoot(TEXT("Grandchild")).Equals(Before, 1.e-3));
+    return true;
+}
+
+BATCH_TEST(FOriginTransferTargetFilterScale, "Origin.Editor.Hierarchy.Blueprint.Transfer.SelectionTargetsHideUnsafeScale")
+bool FOriginTransferTargetFilterScale::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!F.Build(*this) || !TestNotNull(TEXT("Second Pivot"),
+        AddTransferTarget(F, TEXT("OtherPivot"), TEXT("Root")))) return false;
+    USceneComponent* Unsafe = Cast<USceneComponent>(F.Node(TEXT("Inner"))->ComponentTemplate.Get());
+    if (!TestNotNull(TEXT("Inner template"), Unsafe)) return false;
+    FTransform Bad = Unsafe->GetRelativeTransform();
+    Bad.SetScale3D(FVector(2, 1, 1));
+    Unsafe->SetRelativeTransform_Direct(Bad);
+    const FTransform Before = F.InRoot(TEXT("ChildA"));
+    TArray<FName> Candidates;
+    FOriginHierarchyAuthoring::ListTransferTargetsForChildren(F.Pivot(),
+        Names({TEXT("ChildA")}), Candidates);
+    TestFalse(TEXT("Unsafe scale destination hidden"), Candidates.Contains(TEXT("Inner")));
+    TestTrue(TEXT("Safe sibling pivot remains visible"), Candidates.Contains(TEXT("OtherPivot")));
+    TestTrue(TEXT("No mutation in filtered discovery"), F.IsUnder(TEXT("ChildA"), TEXT("Outer")) &&
+        F.InRoot(TEXT("ChildA")).Equals(Before, 1.e-3));
+    return true;
+}
+
+BATCH_TEST(FOriginTransferTargetFilterSelection, "Origin.Editor.Hierarchy.Blueprint.Transfer.SelectionTargetsRejectInvalidChild")
+bool FOriginTransferTargetFilterSelection::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!F.Build(*this)) return false;
+    TArray<FName> Candidates;
+    FOriginHierarchyAuthoring::ListTransferTargetsForChildren(F.Pivot(), {}, Candidates);
+    TestTrue(TEXT("Without selection, valid target discovery is unchanged"), Candidates.Contains(TEXT("Inner")));
+    FOriginHierarchyAuthoring::ListTransferTargetsForChildren(F.Pivot(),
+        Names({TEXT("ChildA"), TEXT("SiblingA")}), Candidates);
+    TestEqual(TEXT("Mixed invalid selection has no eligible destination"), Candidates.Num(), 0);
+    TestTrue(TEXT("No partial movement"), F.IsUnder(TEXT("ChildA"), TEXT("Outer")) &&
+        F.IsUnder(TEXT("SiblingA"), TEXT("Root")));
+    return true;
+}
+
+BATCH_TEST(FOriginTransferRootDomains, "Origin.Editor.Hierarchy.Blueprint.Transfer.SeparateAuthoredRootsReject")
+bool FOriginTransferRootDomains::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!F.Build(*this)) return false;
+    // A second authored SCS root is a distinct frame. Native/inherited
+    // parents may differ, so cross-root moves remain unsafe and rejected.
+    USCS_Node* AnotherRoot = F.SCS()->CreateNode(USceneComponent::StaticClass(), TEXT("OtherRoot"));
+    F.SCS()->AddNode(AnotherRoot);
+    USCS_Node* DifferentPivot = F.SCS()->CreateNode(UOriginPivotComponent::StaticClass(), TEXT("OtherRootPivot"));
+    AnotherRoot->AddChildNode(DifferentPivot, true);
+    const FTransform Before = F.InRoot(TEXT("ChildA"));
+    FText Reason;
+    TestFalse(TEXT("Transfer must reject different root frames"),
+        FOriginHierarchyAuthoring::TransferChildrenToPivot(F.Pivot(), TEXT("OtherRootPivot"),
+            Names({TEXT("ChildA")}), Reason));
+    TArray<FName> Candidates;
+    FOriginHierarchyAuthoring::ListTransferTargetsForChildren(F.Pivot(),
+        Names({TEXT("ChildA")}), Candidates);
+    TestFalse(TEXT("Cross-root destination excluded"), Candidates.Contains(TEXT("OtherRootPivot")));
+    TestTrue(TEXT("Authored source remains unchanged"), F.IsUnder(TEXT("ChildA"), TEXT("Outer")) &&
+        F.InRoot(TEXT("ChildA")).Equals(Before, 1.e-3));
+    return true;
+}
+
 BATCH_TEST(FOriginTransferUndo, "Origin.Editor.Hierarchy.Blueprint.Transfer.Transaction.RepeatedUndoRedo")
 bool FOriginTransferUndo::RunTest(const FString& Parameters)
 {
@@ -765,6 +895,113 @@ bool FOriginTransferUndo::RunTest(const FString& Parameters)
             F.InRoot(TEXT("Grandchild")).Equals(Original, 1.e-3))) return false;
         if (!TestTrue(TEXT("Undo after redo"), Buffer->Undo(true))) return false;
     }
+    return true;
+}
+
+// Opt-in disk persistence integration. Deliberately outside Origin.Editor.* so
+// Origin.Tests.Regression stays fast and does not perform package reloads.
+BATCH_TEST(FOriginSavedBlueprintPersistence, "Origin.Integration.Persistence.BlueprintTransferSaveReload")
+bool FOriginSavedBlueprintPersistence::RunTest(const FString& Parameters)
+{
+    if (!GEditor || GEditor->PlayWorld)
+    {
+        AddError(TEXT("Run the persistence integration test in an idle editor outside PIE."));
+        return false;
+    }
+    // A unique virtual mount backed ONLY by Saved/, never Content/ or an existing asset.
+    // No user package is modified or reloaded by this test.
+    const FString ID = FGuid::NewGuid().ToString(EGuidFormats::Digits);
+    const FString MountRoot = FString::Printf(TEXT("/OriginQATemp_%s/"), *ID);
+    FString DiskRoot = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("OriginPersistenceQA"), ID);
+    FPaths::NormalizeDirectoryName(DiskRoot);
+    DiskRoot += TEXT("/");
+    if (!IFileManager::Get().MakeDirectory(*DiskRoot, true))
+    {
+        AddError(TEXT("Could not create a private Origin persistence test directory under Saved/."));
+        return false;
+    }
+    FPackageName::RegisterMountPoint(MountRoot, DiskRoot);
+    // Unregister the mount and clean our unique Saved/ directory, even on early returns.
+    struct FTestMountCleanup
+    {
+        FString Root, Disk;
+        ~FTestMountCleanup()
+        {
+            FPackageName::UnRegisterMountPoint(Root, Disk);
+            // Only the unique fixture directory is deleted, never the parent QA folder.
+            IFileManager::Get().DeleteDirectory(*Disk, false, true);
+        }
+    } Cleanup{MountRoot, DiskRoot};
+
+    const FString AssetName = FString::Printf(TEXT("OriginPersistence_%s"), *ID);
+    const FString LongPackageName = MountRoot + AssetName;
+    UPackage* Package = CreatePackage(*LongPackageName);
+    if (!TestNotNull(TEXT("Dedicated mounted scratch package"), Package)) return false;
+    const FString Filename = FPaths::Combine(DiskRoot, AssetName + FPackageName::GetAssetPackageExtension());
+    FBatchFixture Fixture;
+    if (!Fixture.Build(*this, false, Package, FName(*AssetName))) return false;
+    if (!TestTrue(TEXT("Blueprint fixture is inside isolated scratch package"),
+        Fixture.Blueprint->GetOutermost() == Package)) return false;
+    const FTransform OriginalA = Fixture.InRoot(TEXT("ChildA"));
+    const FTransform OriginalGrandchild = Fixture.InRoot(TEXT("Grandchild"));
+    const FTransform OriginalB = Fixture.InRoot(TEXT("ChildB"));
+    // Physical fixtures use a transaction-bearing package, but must never
+    // add an Undo entry to the user's normal editor history.
+    {
+        FPrivateUndo LocalUndo;
+        UTransBuffer* Buffer = LocalUndo.Get();
+        if (!TestNotNull(TEXT("Isolated integration-test transaction buffer"), Buffer)) return false;
+        FText Reason;
+        if (!TestTrue(TEXT("Transfer a branch before saving"),
+            FOriginHierarchyAuthoring::TransferChildrenToPivot(Fixture.Pivot(), TEXT("Inner"),
+                Names({TEXT("ChildA")}), Reason)))
+        { AddError(Reason.ToString()); return false; }
+        Buffer->Reset(FText::FromString(TEXT("Origin scratch persistence test completed its edit")));
+    }
+    FKismetEditorUtilities::CompileBlueprint(Fixture.Blueprint.Get(),
+        EBlueprintCompileOptions::SkipGarbageCollection, nullptr);
+    Fixture.Blueprint->SetFlags(RF_Public | RF_Standalone);
+    FSavePackageArgs SaveArgs;
+    SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+    if (!TestTrue(TEXT("UE saved the edited Blueprint asset to its own private .uasset"),
+        UPackage::SavePackage(Package, Fixture.Blueprint.Get(), *Filename, SaveArgs))) return false;
+    if (!TestTrue(TEXT("Scratch .uasset is present on disk"), IFileManager::Get().FileExists(*Filename))) return false;
+
+    // Release our explicit strong ref before asking UE to reload the scratch package.
+    Fixture.Blueprint.Reset();
+    UPackage* Reloaded = ReloadPackage(Package, LOAD_None);
+    if (!TestNotNull(TEXT("Scratch package unloaded and reloaded from disk"), Reloaded)) return false;
+    UBlueprint* ReloadedBP = FindObject<UBlueprint>(Reloaded, *AssetName);
+    if (!TestNotNull(TEXT("Saved Blueprint reloaded"), ReloadedBP)) return false;
+    USimpleConstructionScript* Script = ReloadedBP->SimpleConstructionScript;
+    if (!TestNotNull(TEXT("Reloaded authored SCS"), Script)) return false;
+    auto Node = [Script](FName Name) { return Script->FindSCSNode(Name); };
+    USCS_Node* Child = Node(TEXT("ChildA"));
+    USCS_Node* Grandchild = Node(TEXT("Grandchild"));
+    if (!TestNotNull(TEXT("Reloaded moved child"), Child) ||
+        !TestNotNull(TEXT("Reloaded grandchild"), Grandchild)) return false;
+    TestTrue(TEXT("Transferred topology survived physical save/reload"),
+        Script->FindParentNode(Child) == Node(TEXT("Inner")) &&
+        Script->FindParentNode(Grandchild) == Child);
+    auto InRoot = [&Node, Script](FName Name)
+    {
+        FTransform Total = FTransform::Identity;
+        USCS_Node* Current = Node(Name);
+        for (int32 Depth = 0; Depth < 128 && IsValid(Current) && Current != Node(TEXT("Root")); ++Depth)
+        {
+            const USceneComponent* Template = Cast<USceneComponent>(Current->ComponentTemplate.Get());
+            if (!IsValid(Template)) return FTransform::Identity;
+            Total = Total * Template->GetRelativeTransform();
+            Current = Script->FindParentNode(Current);
+        }
+        return Total;
+    };
+    TestTrue(TEXT("Moved child placement persisted"), InRoot(TEXT("ChildA")).Equals(OriginalA, 1.e-3));
+    TestTrue(TEXT("Grandchild placement persisted"), InRoot(TEXT("Grandchild")).Equals(OriginalGrandchild, 1.e-3));
+    TestTrue(TEXT("Unselected child placement persisted"), InRoot(TEXT("ChildB")).Equals(OriginalB, 1.e-3));
+    TestTrue(TEXT("Original Pivot and nested Pivot survived"),
+        IsValid(Node(TEXT("Outer"))) && IsValid(Node(TEXT("Inner"))) &&
+        Node(TEXT("Inner"))->ComponentTemplate->IsA<UOriginPivotComponent>());
     return true;
 }
 

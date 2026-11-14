@@ -35,6 +35,11 @@ struct FOriginHierarchyAuthoring
      */
     static bool TransferChildrenToPivot(UOriginPivotComponent* SourcePivot, FName TargetPivotVariable,
         const TArray<FName>& Variables, FText& OutReason);
+    /** Targets safe for the current selected child branches. Read-only and selection-aware.
+     * An empty selection returns all compatible authored pivots as a discovery aid.
+     */
+    static void ListTransferTargetsForChildren(UOriginPivotComponent* SourcePivot,
+        const TArray<FName>& SelectedVariables, TArray<FName>& OutTargets);
     /** Compatible authored target pivots; actual selections receive full preflight. */
     static void ListTransferTargets(UOriginPivotComponent* SourcePivot, TArray<FName>& OutTargets);
     /** Read-only options; never modify the asset or its preview. */
