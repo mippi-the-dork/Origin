@@ -18,6 +18,7 @@
 #include "Misc/PackageName.h"
 #include "Misc/Paths.h"
 #include "HAL/FileManager.h"
+#include "HAL/PlatformTime.h"
 #include "UObject/SavePackage.h"
 #include "UObject/PackageReload.h"
 #include "UObject/Package.h"
@@ -911,7 +912,10 @@ bool FOriginSavedBlueprintPersistence::RunTest(const FString& Parameters)
     // A unique virtual mount backed ONLY by Saved/, never Content/ or an existing asset.
     // No user package is modified or reloaded by this test.
     const FString ID = FGuid::NewGuid().ToString(EGuidFormats::Digits);
-    const FString MountRoot = FString::Printf(TEXT("/OriginQATemp_%s/"), *ID);
+    // Use a unique nested /Game/ path for standard editor asset-path handling.
+    // The nested mount redirects ONLY this scratch subtree to Saved/, so no
+    // user Content asset is created, edited, or removed.
+    const FString MountRoot = FString::Printf(TEXT("/Game/__OriginPersistenceQA_%s/"), *ID);
     FString DiskRoot = FPaths::Combine(FPaths::ProjectSavedDir(), TEXT("OriginPersistenceQA"), ID);
     FPaths::NormalizeDirectoryName(DiskRoot);
     DiskRoot += TEXT("/");
@@ -920,24 +924,50 @@ bool FOriginSavedBlueprintPersistence::RunTest(const FString& Parameters)
         AddError(TEXT("Could not create a private Origin persistence test directory under Saved/."));
         return false;
     }
-    FPackageName::RegisterMountPoint(MountRoot, DiskRoot);
-    // Unregister the mount and clean our unique Saved/ directory, even on early returns.
+    // A package reload can enqueue editor DataValidation for the next tick.
+    // Do not unmount/delete the fixture synchronously on RunTest's return.
+    // Keep it mounted for subsequent editor ticks, then remove it once the
+    // deferred editor callbacks have had a chance to process the valid path.
+    const auto RegisteredMount = FPackageName::RegisterMountPoint(MountRoot, DiskRoot);
+    if (!RegisteredMount.IsValid())
+    {
+        IFileManager::Get().DeleteDirectory(*DiskRoot, false, true);
+        AddError(TEXT("Could not register the private Origin persistence test mount."));
+        return false;
+    }
     struct FTestMountCleanup
     {
         FString Root, Disk;
+        TStrongObjectPtr<UBlueprint> ReloadedBlueprint;
+        FTestMountCleanup(const FString& InRoot, const FString& InDisk)
+            : Root(InRoot), Disk(InDisk) {}
         ~FTestMountCleanup()
         {
+            ReloadedBlueprint.Reset();
             FPackageName::UnRegisterMountPoint(Root, Disk);
-            // Only the unique fixture directory is deleted, never the parent QA folder.
+            // Delete only this run's GUID-named directory beneath Saved/.
             IFileManager::Get().DeleteDirectory(*Disk, false, true);
         }
-    } Cleanup{MountRoot, DiskRoot};
+    };
+    TSharedRef<FTestMountCleanup> Cleanup = MakeShared<FTestMountCleanup>(MountRoot, DiskRoot);
 
     const FString AssetName = FString::Printf(TEXT("OriginPersistence_%s"), *ID);
     const FString LongPackageName = MountRoot + AssetName;
     UPackage* Package = CreatePackage(*LongPackageName);
     if (!TestNotNull(TEXT("Dedicated mounted scratch package"), Package)) return false;
     const FString Filename = FPaths::Combine(DiskRoot, AssetName + FPackageName::GetAssetPackageExtension());
+    // A nested /Game/ mount must resolve exactly to our Saved/ fixture path,
+    // never to a similarly named folder in the project's Content directory.
+    FString ResolvedFilename;
+    if (!TestTrue(TEXT("Temporary package path resolves through the private Saved/ mount"),
+        FPackageName::TryConvertLongPackageNameToFilename(LongPackageName,
+            ResolvedFilename, FPackageName::GetAssetPackageExtension()))) return false;
+    FString ExpectedPath = FPaths::ConvertRelativePathToFull(Filename);
+    FString ActualPath = FPaths::ConvertRelativePathToFull(ResolvedFilename);
+    FPaths::NormalizeFilename(ExpectedPath);
+    FPaths::NormalizeFilename(ActualPath);
+    if (!TestTrue(TEXT("Temporary mount does not resolve into user Content"),
+        ExpectedPath.Equals(ActualPath, ESearchCase::IgnoreCase))) return false;
     FBatchFixture Fixture;
     if (!Fixture.Build(*this, false, Package, FName(*AssetName))) return false;
     if (!TestTrue(TEXT("Blueprint fixture is inside isolated scratch package"),
@@ -973,6 +1003,7 @@ bool FOriginSavedBlueprintPersistence::RunTest(const FString& Parameters)
     if (!TestNotNull(TEXT("Scratch package unloaded and reloaded from disk"), Reloaded)) return false;
     UBlueprint* ReloadedBP = FindObject<UBlueprint>(Reloaded, *AssetName);
     if (!TestNotNull(TEXT("Saved Blueprint reloaded"), ReloadedBP)) return false;
+    Cleanup->ReloadedBlueprint.Reset(ReloadedBP);
     USimpleConstructionScript* Script = ReloadedBP->SimpleConstructionScript;
     if (!TestNotNull(TEXT("Reloaded authored SCS"), Script)) return false;
     auto Node = [Script](FName Name) { return Script->FindSCSNode(Name); };
@@ -1002,6 +1033,17 @@ bool FOriginSavedBlueprintPersistence::RunTest(const FString& Parameters)
     TestTrue(TEXT("Original Pivot and nested Pivot survived"),
         IsValid(Node(TEXT("Outer"))) && IsValid(Node(TEXT("Inner"))) &&
         Node(TEXT("Inner"))->ComponentTemplate->IsA<UOriginPivotComponent>());
+
+    // Engine validators can be queued by ReloadPackage and execute on a later
+    // frame. Retain the mount, saved bytes and Blueprint until after those
+    // callbacks; the automation framework keeps this latent command alive.
+    // No global DataValidation settings or other plugins are altered.
+    const double ReleaseAfter = FPlatformTime::Seconds() + 1.0;
+    AddCommand(new FFunctionLatentCommand([Cleanup, ReleaseAfter, FrameCount = 0]() mutable
+    {
+        ++FrameCount;
+        return FrameCount >= 4 && FPlatformTime::Seconds() >= ReleaseAfter;
+    }));
     return true;
 }
 
