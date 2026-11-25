@@ -60,7 +60,7 @@ namespace
         // Displayed as Pitch/Yaw/Roll in degrees, composed in world space.
         FRotator RotationDelta = FRotator::ZeroRotator;
         FName SelectedSlotName = TEXT("Default");
-        FString ProposedSlotName = TEXT("NewPivot");
+        FString ProposedSlotName;
         TArray<TSharedPtr<FName>> SlotOptions;
         TWeakPtr<SComboBox<TSharedPtr<FName>>> SlotCombo;
         FName SelectedSibling = NAME_None;
@@ -70,6 +70,12 @@ namespace
         TWeakPtr<SComboBox<TSharedPtr<FName>>> TransferTargetCombo;
         TSet<FName> BatchSiblings;
         TSet<FName> BatchChildren;
+        // A socket-attached child can be inserted under a new Pivot, but it
+        // cannot be freely promoted, detached or transferred to another Pivot.
+        TSet<FName> MovableChildren;
+        TSet<FName> MovableSiblings;
+        TSet<FName> SocketInsertChildren;
+        TSet<FName> SocketInsertSiblings;
         TArray<TSharedPtr<FName>> SiblingOptions;
         TArray<TSharedPtr<FName>> ChildOptions;
         TWeakPtr<SComboBox<TSharedPtr<FName>>> SiblingCombo;
@@ -90,8 +96,46 @@ namespace
 
         void RefreshHierarchyChoices()
         {
-            TArray<FName> Siblings, Children;
+            TArray<FName> Siblings, Children, Insertable, InsertableSiblings;
             FOriginHierarchyAuthoring::ListSiblingsAndChildren(Component.Get(), Siblings, Children);
+            FOriginHierarchyAuthoring::ListInsertableChildren(Component.Get(), Insertable);
+            FOriginHierarchyAuthoring::ListInsertableSiblings(Component.Get(), InsertableSiblings);
+            const bool bExternalParent = FOriginHierarchyAuthoring::CanGroupExternalParentSiblings(Component.Get());
+            TArray<FName> ExternalSocketSiblings;
+            if (bExternalParent)
+            {
+                // A native/inherited parent has no authored SCS parent node.
+                // Only same-parent authored roots can be grouped, not freely moved.
+                FOriginHierarchyAuthoring::ListExternalParentSiblings(Component.Get(),
+                    Siblings, ExternalSocketSiblings);
+            }
+            MovableChildren.Reset();
+            MovableSiblings.Reset();
+            SocketInsertChildren.Reset();
+            SocketInsertSiblings.Reset();
+            if (!bExternalParent)
+                for (FName Name : Siblings) MovableSiblings.Add(Name);
+            else
+                for (FName Name : ExternalSocketSiblings) SocketInsertSiblings.Add(Name);
+            for (FName Name : InsertableSiblings)
+            {
+                if (!MovableSiblings.Contains(Name))
+                {
+                    SocketInsertSiblings.Add(Name);
+                    Siblings.Add(Name);
+                }
+            }
+            Siblings.Sort([](FName A, FName B) { return A.LexicalLess(B); });
+            for (FName Name : Children) MovableChildren.Add(Name);
+            for (FName Name : Insertable)
+            {
+                if (!MovableChildren.Contains(Name))
+                {
+                    SocketInsertChildren.Add(Name);
+                    Children.Add(Name);
+                }
+            }
+            Children.Sort([](FName A, FName B) { return A.LexicalLess(B); });
             SiblingOptions.Reset();
             ChildOptions.Reset();
             for (FName Name : Siblings) SiblingOptions.Add(MakeShared<FName>(Name));
@@ -109,15 +153,31 @@ namespace
             RefreshTransferTargetChoices();
         }
 
+        bool AreBatchSiblingsMovable() const
+        {
+            if (BatchSiblings.IsEmpty()) return false;
+            for (FName Name : BatchSiblings)
+                if (!MovableSiblings.Contains(Name)) return false;
+            return true;
+        }
+
+        bool AreBatchChildrenMovable() const
+        {
+            if (BatchChildren.IsEmpty()) return false;
+            for (FName Name : BatchChildren)
+                if (!MovableChildren.Contains(Name)) return false;
+            return true;
+        }
+
         FReply Restructure(int32 Action)
         {
             UOriginPivotComponent* Pivot = Component.Get();
             if (!FOriginHierarchyAuthoring::CanEdit(Pivot)) return FReply::Handled();
             FText Reason;
             bool bOk = false;
-            if (Action == 0 && !SelectedSibling.IsNone())
+            if (Action == 0 && MovableSiblings.Contains(SelectedSibling))
                 bOk = FOriginHierarchyAuthoring::AdoptSibling(Pivot, SelectedSibling, Reason);
-            else if (Action == 1 && !SelectedChild.IsNone())
+            else if (Action == 1 && !SelectedChild.IsNone() && MovableChildren.Contains(SelectedChild))
                 bOk = FOriginHierarchyAuthoring::PromoteChild(Pivot, SelectedChild, Reason);
             else if (Action == 2 && !SelectedChild.IsNone())
             {
@@ -171,8 +231,11 @@ namespace
             {
                 if (!Option.IsValid()) continue;
                 const FName Name = *Option;
-                Menu.AddMenuEntry(FText::FromName(Name),
-                    LOCTEXT("BatchChooseTip", "Toggle this authored component in the atomic batch operation."),
+                const FText DisplayName = (bSiblings ? SocketInsertSiblings : SocketInsertChildren).Contains(Name)
+                    ? FText::Format(LOCTEXT("SocketChildMenuName", "{0} (socket-attached)"), FText::FromName(Name))
+                    : FText::FromName(Name);
+                Menu.AddMenuEntry(DisplayName,
+                    LOCTEXT("BatchChooseTip", "Toggle this authored component in the atomic batch operation. Socket-attached components support insertion only, and shared insertion requires the same socket for all selected children."),
                     FSlateIcon(), FUIAction(
                         FExecuteAction::CreateLambda([WeakSelf, bSiblings, Name]
                         {
@@ -217,6 +280,19 @@ namespace
             else if (Action == 4)
                 bOk = FOriginHierarchyAuthoring::TransferChildrenToPivot(
                     Pivot, SelectedTransferTarget, Names, Reason);
+            else if (Action == 5 || Action == 6)
+            {
+                Names = BatchSiblings.Array();
+                Names.Sort([](FName A, FName B) { return A.LexicalLess(B); });
+                if (Action == 5)
+                {
+                    FName NewVariable;
+                    bOk = FOriginHierarchyAuthoring::InsertSharedPivotAboveSiblings(
+                        Pivot, Names, NewVariable, Reason);
+                }
+                else
+                    bOk = FOriginHierarchyAuthoring::AdoptExternalParentSiblings(Pivot, Names, Reason);
+            }
             if (!bOk)
                 Origin::Notify(Reason.IsEmpty()
                     ? LOCTEXT("BatchSelectionRequired", "Select at least one eligible authored component.") : Reason);
@@ -502,11 +578,117 @@ void FOriginPivotComponentDetails::CustomizeDetails(IDetailLayoutBuilder& Builde
     State->RefreshSlots();
     State->RefreshHierarchyChoices();
 
+    // Start with the daily Pivot edit flow; keep the advanced controls below,
+    // collapsed by default so users can find hierarchy work when needed.
+    Category.AddCustomRow(LOCTEXT("PivotDescriptionSearch", "Pivot help"))
+        .WholeRowContent()
+        [SNew(STextBlock)
+            .Text(LOCTEXT("PivotHelp", "Move the Pivot to move the assembly. Edit the Pivot to move only its control point."))
+            .AutoWrapText(true)];
+
+    IDetailGroup& Edit = Category.AddGroup(TEXT("OriginPivotEdit"), LOCTEXT("EditPivotGroup", "Edit Pivot"), false, true);
+    Edit.AddWidgetRow().WholeRowContent()
+        [SNew(SButton)
+            .Text_Lambda([WeakPivot]
+            {
+                return FOriginPivotViewportMode::IsEditing(WeakPivot.Get())
+                    ? LOCTEXT("FinishViewportPivot", "Finish Viewport Pivot Editing")
+                    : LOCTEXT("BeginViewportPivot", "Edit Pivot in Viewport");
+            })
+            .ToolTipText(LOCTEXT("ViewportPivotTip", "Uses native Translate (W) and Rotate (E) widgets. In Blueprints this edits authored SCS templates (not just the preview); in levels it preserves attached actors and components. One Undo step per drag. Scale is unavailable."))
+            .IsEnabled_Lambda([State] { return State->CanEdit(); })
+            .OnClicked_Lambda([WeakPivot, State]
+            {
+                if (UOriginPivotComponent* Component = WeakPivot.Get())
+                {
+                    // Pending typed offsets must never be carried into an active
+                    // viewport edit and accidentally re-applied afterward.
+                    State->TranslationDelta = FVector::ZeroVector;
+                    State->RotationDelta = FRotator::ZeroRotator;
+                    FOriginPivotViewportMode::Toggle(Component);
+                }
+                return FReply::Handled();
+            })];
+    Edit.AddWidgetRow().WholeRowContent()
+        [SNew(STextBlock)
+            .Text_Lambda([WeakPivot]
+            {
+                return FOriginPivotViewportMode::IsEditing(WeakPivot.Get())
+                    ? LOCTEXT("ViewportActiveHint", "Viewport edit active: W move, E rotate, Esc cancel. Offsets below are read-only.")
+                    : LOCTEXT("ViewportInactiveHint", "Use W to move or E to rotate the pivot; attached components stay in place.");
+            })
+            .AutoWrapText(true)];
+    Edit.AddWidgetRow()
+        .NameContent()[SNew(STextBlock)
+            .Text(LOCTEXT("PositionDelta", "Move Pivot (cm)"))
+            .ToolTipText(LOCTEXT("PositionDeltaTip", "Pivot translation offset (world space for placed components, parent-relative for Blueprint templates)."))]
+        .ValueContent().MinDesiredWidth(240.0f)[MakeDeltaFields(State, false)];
+    Edit.AddWidgetRow()
+        .NameContent()[SNew(STextBlock)
+            .Text(LOCTEXT("RotationDelta", "Rotate Pivot (degrees)"))
+            .ToolTipText(LOCTEXT("RotationDeltaTip", "Pivot rotation offset (world space for placed components, parent-relative for Blueprint templates)."))]
+        .ValueContent().MinDesiredWidth(240.0f)[MakeDeltaFields(State, true)];
+    Edit.AddWidgetRow().WholeRowContent()
+        [SNew(SHorizontalBox)
+            + SHorizontalBox::Slot().FillWidth(1.0f).Padding(0, 3, 6, 0)
+            [SNew(SButton)
+                .Text(LOCTEXT("Apply", "Apply Pivot Edit"))
+                .ToolTipText(LOCTEXT("ApplyTip", "Apply the offset as a single Undo transaction. Attached Actors and Components retain their world transforms."))
+                .IsEnabled_Lambda([State] { return State->CanEditNumeric() && State->HasDelta(); })
+                .OnClicked_Lambda([State] { return State->Apply(); })]
+            + SHorizontalBox::Slot().AutoWidth().Padding(0, 3, 0, 0)
+            [SNew(SButton)
+                .Text(LOCTEXT("Reset", "Clear"))
+                .IsEnabled_Lambda([State] { return State->CanEditNumeric() && State->HasDelta(); })
+                .OnClicked_Lambda([State]
+                {
+                    State->TranslationDelta = FVector::ZeroVector;
+                    State->RotationDelta = FRotator::ZeroRotator;
+                    return FReply::Handled();
+                })]];
+    Edit.AddWidgetRow().WholeRowContent()
+        [SNew(STextBlock)
+            .Text_Lambda([State]
+            {
+                return State->CanEdit()
+                    ? LOCTEXT("DeltaHelp", "Numeric offsets apply on click. Viewport edits apply live. Scale stays unchanged.")
+                    : LOCTEXT("DeltaUnavailable", "Editing is unavailable for this component or editor state.");
+            })
+            .AutoWrapText(true)];
+
+    IDetailGroup& Snap = Category.AddGroup(TEXT("OriginPivotSnap"),
+        LOCTEXT("SnapGroup", "Quick Pivot Placement"), false, true);
+    Snap.AddWidgetRow().WholeRowContent()
+        [SNew(SHorizontalBox)
+            + SHorizontalBox::Slot().FillWidth(1).Padding(0, 2, 4, 2)
+            [SNew(SButton)
+                .Text(LOCTEXT("ToChildren", "Average Children"))
+                .ToolTipText(LOCTEXT("ToChildrenTip", "Move pivot location to the average world positions of direct child component origins (parent-local in Blueprints)."))
+                .IsEnabled_Lambda([State] { return State->CanAuthorSlots(); })
+                .OnClicked_Lambda([State] { return State->Snap(EOriginPivotSnapAction::AverageDirectChildren); })]
+            + SHorizontalBox::Slot().FillWidth(1).Padding(0, 2, 4, 2)
+            [SNew(SButton)
+                .Text(LOCTEXT("ToParent", "Parent Position"))
+                .ToolTipText(LOCTEXT("ToParentTip", "Align pivot location to its parent origin. Preserves all child transforms."))
+                .IsEnabled_Lambda([State] { return State->CanAuthorSlots(); })
+                .OnClicked_Lambda([State] { return State->Snap(EOriginPivotSnapAction::ParentOrigin); })]
+            + SHorizontalBox::Slot().FillWidth(1).Padding(0, 2, 0, 2)
+            [SNew(SButton)
+                .Text(LOCTEXT("MatchParent", "Parent Rotation"))
+                .ToolTipText(LOCTEXT("MatchParentTip", "Align pivot orientation to parent while retaining pivot position and child world transforms."))
+                .IsEnabled_Lambda([State] { return State->CanAuthorSlots(); })
+                .OnClicked_Lambda([State] { return State->Snap(EOriginPivotSnapAction::ParentOrientation); })]];
+    Snap.AddWidgetRow().WholeRowContent()
+        [SNew(STextBlock)
+            .Text(LOCTEXT("SnapNote", "Immediate actions; the attached components stay in place. Undo is supported."))
+            .AutoWrapText(true)];
+
+
     IDetailGroup& Slots = Category.AddGroup(TEXT("OriginPivotSlots"),
-        LOCTEXT("NamedPivotSlots", "Named Pivot Slots"), false, true);
+        LOCTEXT("NamedPivotSlots", "Saved Pivot Poses"), false, false);
     TSharedPtr<SComboBox<TSharedPtr<FName>>> SlotSelector;
     Slots.AddWidgetRow()
-        .NameContent()[SNew(STextBlock).Text(LOCTEXT("SelectedSlot", "Selected Slot"))]
+        .NameContent()[SNew(STextBlock).Text(LOCTEXT("SelectedSlot", "Saved Pose"))]
         .ValueContent().MinDesiredWidth(240.0f)
         [SAssignNew(SlotSelector, SComboBox<TSharedPtr<FName>>)
             .OptionsSource(&State->SlotOptions)
@@ -560,19 +742,20 @@ void FOriginPivotComponentDetails::CustomizeDetails(IDetailLayoutBuilder& Builde
             + SHorizontalBox::Slot().FillWidth(1.0f).Padding(0, 2, 5, 2)
             [SNew(SEditableTextBox)
                 .Text(FText::FromString(State->ProposedSlotName))
-                .HintText(LOCTEXT("NewNameHint", "New slot name"))
+                .HintText(LOCTEXT("NewNameHint", "New pose name (e.g. CombatGrip)"))
                 .OnTextChanged_Lambda([State](const FText& Text) { State->ProposedSlotName = Text.ToString(); })]
             + SHorizontalBox::Slot().AutoWidth().Padding(0, 2, 0, 2)
             [SNew(SButton)
-                .Text(LOCTEXT("CreateNamed", "Capture New Slot"))
+                .Text(LOCTEXT("CreateNamed", "Save Current as New Pose"))
                 .ToolTipText(LOCTEXT("CreateNamedTip", "Create a new named slot with the current pivot's parent-relative transform. Does not move the assembly."))
-                .IsEnabled_Lambda([State] { return State->CanAuthorSlots(); })
+                .IsEnabled_Lambda([State] { return State->CanAuthorSlots() &&
+                    !State->ProposedSlotName.TrimStartAndEnd().IsEmpty(); })
                 .OnClicked_Lambda([State] { return State->SlotOperation(0); })]];
     Slots.AddWidgetRow().WholeRowContent()
         [SNew(SHorizontalBox)
             + SHorizontalBox::Slot().FillWidth(1).Padding(0, 2, 4, 2)
             [SNew(SButton)
-                .Text(LOCTEXT("OverwriteSlot", "Capture Current"))
+                .Text(LOCTEXT("OverwriteSlot", "Update Selected Pose"))
                 .ToolTipText(LOCTEXT("OverwriteSlotTip", "Overwrite the selected slot pose with the current pivot pose. You can capture the legacy Default slot here."))
                 .IsEnabled_Lambda([State] { return State->CanAuthorSlots(); })
                 .OnClicked_Lambda([State] { return State->SlotOperation(1); })]
@@ -599,17 +782,19 @@ void FOriginPivotComponentDetails::CustomizeDetails(IDetailLayoutBuilder& Builde
         [SNew(SHorizontalBox)
             + SHorizontalBox::Slot().FillWidth(1).Padding(0, 2, 4, 2)
             [SNew(SButton)
-                .Text(LOCTEXT("DuplicateSlot", "Duplicate as New Name"))
+                .Text(LOCTEXT("DuplicateSlot", "Duplicate to Name"))
                 .ToolTipText(LOCTEXT("DuplicateSlotTip", "Duplicate the selected slot under the name in the text field above, without moving the pivot."))
-                .IsEnabled_Lambda([State] { return State->CanAuthorSlots(); })
+                .IsEnabled_Lambda([State] { return State->CanAuthorSlots() &&
+                    !State->ProposedSlotName.TrimStartAndEnd().IsEmpty(); })
                 .OnClicked_Lambda([State] { return State->SlotOperation(4); })]
             + SHorizontalBox::Slot().FillWidth(1).Padding(0, 2, 0, 2)
             [SNew(SButton)
-                .Text(LOCTEXT("RenameSlot", "Rename to New Name"))
+                .Text(LOCTEXT("RenameSlot", "Rename to Name"))
                 .ToolTipText(LOCTEXT("RenameSlotTip", "Rename the selected slot to the text above. Default cannot be renamed."))
                 .IsEnabled_Lambda([State]
                 {
-                    return State->CanAuthorSlots() && State->SelectedSlotName != FName(TEXT("Default"));
+                    return State->CanAuthorSlots() && !State->ProposedSlotName.TrimStartAndEnd().IsEmpty() &&
+                        State->SelectedSlotName != FName(TEXT("Default"));
                 })
                 .OnClicked_Lambda([State] { return State->SlotOperation(5); })]];
 
@@ -617,12 +802,12 @@ void FOriginPivotComponentDetails::CustomizeDetails(IDetailLayoutBuilder& Builde
     // never changes an explicitly captured pose or moves the assembly; the
     // Recalculate button uses the same transaction service as Snap/Align.
     IDetailGroup& SourceRules = Category.AddGroup(TEXT("OriginPivotSources"),
-        LOCTEXT("SourceRules", "Calculated Pivot Source"), false, true);
+        LOCTEXT("SourceRules", "Pivot Placement Rules"), false, false);
     SourceRules.AddWidgetRow().WholeRowContent()
         [SNew(STextBlock).AutoWrapText(true)
-            .Text(LOCTEXT("SourceHelp", "Choose a source rule, then Recalculate Pivot. Level instances use world coordinates; authored Blueprint components use the pivot parent's local frame. Existing named poses are never overwritten."))];
+            .Text(LOCTEXT("SourceHelp", "Choose a placement method, then apply it. Calculated positions do not overwrite saved poses."))];
     SourceRules.AddWidgetRow()
-        .NameContent()[SNew(STextBlock).Text(LOCTEXT("SourceMode", "Pivot Mode"))]
+        .NameContent()[SNew(STextBlock).Text(LOCTEXT("SourceMode", "Placement Method"))]
         .ValueContent().MinDesiredWidth(240)
         [SNew(SComboButton).IsEnabled_Lambda([State] { return State->CanAuthorSlots(); })
             .ButtonContent()[SNew(STextBlock).Text_Lambda([State] {
@@ -777,47 +962,20 @@ void FOriginPivotComponentDetails::CustomizeDetails(IDetailLayoutBuilder& Builde
         .NameContent()[SNew(STextBlock).Text(LOCTEXT("SourceOffset", "Offset X / Y / Z"))]
         .ValueContent().MinDesiredWidth(240)[Coordinates(true)];
     SourceRules.AddWidgetRow().WholeRowContent()
-        [SNew(SButton).Text(LOCTEXT("CalculateSourceButton", "Recalculate Pivot"))
+        [SNew(SButton).Text(LOCTEXT("CalculateSourceButton", "Place Pivot Using Rule"))
             .ToolTipText(LOCTEXT("CalculateSourceTip", "Apply the current source to the pivot without moving the assembly or overwriting captured named poses. Invalid or missing sources are rejected."))
             .IsEnabled_Lambda([State] { return State->CanAuthorSlots(); })
             .OnClicked_Lambda([State] { return State->RecalculateSource(); })];
-
-    IDetailGroup& Snap = Category.AddGroup(TEXT("OriginPivotSnap"),
-        LOCTEXT("SnapGroup", "Snap / Align Pivot"), false, true);
-    Snap.AddWidgetRow().WholeRowContent()
-        [SNew(SHorizontalBox)
-            + SHorizontalBox::Slot().FillWidth(1).Padding(0, 2, 4, 2)
-            [SNew(SButton)
-                .Text(LOCTEXT("ToChildren", "Avg Child Origins"))
-                .ToolTipText(LOCTEXT("ToChildrenTip", "Move pivot location to the average world positions of direct child component origins (parent-local in Blueprints)."))
-                .IsEnabled_Lambda([State] { return State->CanAuthorSlots(); })
-                .OnClicked_Lambda([State] { return State->Snap(EOriginPivotSnapAction::AverageDirectChildren); })]
-            + SHorizontalBox::Slot().FillWidth(1).Padding(0, 2, 4, 2)
-            [SNew(SButton)
-                .Text(LOCTEXT("ToParent", "To Parent"))
-                .ToolTipText(LOCTEXT("ToParentTip", "Align pivot location to its parent origin. Preserves all child transforms."))
-                .IsEnabled_Lambda([State] { return State->CanAuthorSlots(); })
-                .OnClicked_Lambda([State] { return State->Snap(EOriginPivotSnapAction::ParentOrigin); })]
-            + SHorizontalBox::Slot().FillWidth(1).Padding(0, 2, 0, 2)
-            [SNew(SButton)
-                .Text(LOCTEXT("MatchParent", "Match Parent Rotation"))
-                .ToolTipText(LOCTEXT("MatchParentTip", "Align pivot orientation to parent while retaining pivot position and child world transforms."))
-                .IsEnabled_Lambda([State] { return State->CanAuthorSlots(); })
-                .OnClicked_Lambda([State] { return State->Snap(EOriginPivotSnapAction::ParentOrientation); })]];
-    Snap.AddWidgetRow().WholeRowContent()
-        [SNew(STextBlock)
-            .Text(LOCTEXT("SnapNote", "These actions move the pivot, not the assembly. Capture Current to store the new pose in a named slot. Blueprint hierarchy operations are in the section below."))
-            .AutoWrapText(true)];
 
     // Structural authoring is intentionally Blueprint-only in this first gate.
     // The controls enumerate authored SCS variables, not preview Actor components.
     if (FOriginHierarchyAuthoring::CanEdit(State->Component.Get()))
     {
         IDetailGroup& Hierarchy = Category.AddGroup(TEXT("OriginHierarchyAuthoring"),
-            LOCTEXT("HierarchyGroup", "Blueprint Hierarchy Authoring"), false, true);
+            LOCTEXT("HierarchyGroup", "Blueprint Hierarchy"), false, false);
         Hierarchy.AddWidgetRow().WholeRowContent()
             [SNew(STextBlock)
-                .Text(LOCTEXT("HierarchyHelp", "Choose an authored component, then change its SCS parent while preserving its placement. Each operation is one Undo step. Socket attachments and inherited components are excluded."))
+                .Text(LOCTEXT("HierarchyHelp", "Choose an authored component, then change its SCS parent while preserving its placement. Each operation is one Undo step. Socket-attached siblings or children may be grouped beneath a new Pivot while transferring their common socket to that Pivot. Promote, detach and transfer still reject socket-dependent branches; native/inherited components cannot be moved directly."))
                 .AutoWrapText(true)];
         TSharedPtr<SComboBox<TSharedPtr<FName>>> SiblingSelector;
         Hierarchy.AddWidgetRow()
@@ -835,14 +993,18 @@ void FOriginPivotComponentDetails::CustomizeDetails(IDetailLayoutBuilder& Builde
                 })
                 .Content()[SNew(STextBlock).Text_Lambda([State]
                 {
-                    return State->SelectedSibling.IsNone() ? LOCTEXT("NoSibling", "No eligible sibling") : FText::FromName(State->SelectedSibling);
+                    if (State->SelectedSibling.IsNone()) return LOCTEXT("NoSibling", "No eligible sibling");
+                    return State->SocketInsertSiblings.Contains(State->SelectedSibling)
+                        ? FText::Format(LOCTEXT("SocketSiblingSelection", "{0} (socket-attached)"), FText::FromName(State->SelectedSibling))
+                        : FText::FromName(State->SelectedSibling);
                 })]];
         State->SiblingCombo = SiblingSelector;
         Hierarchy.AddWidgetRow().WholeRowContent()
             [SNew(SButton)
                 .Text(LOCTEXT("AdoptSibling", "Reparent Sibling To This Pivot"))
                 .ToolTipText(LOCTEXT("AdoptSiblingTip", "Move the selected component from this pivot's SCS parent to this pivot. Preserve the component and its descendants in the same parent frame."))
-                .IsEnabled_Lambda([State] { return FOriginHierarchyAuthoring::CanEdit(State->Component.Get()) && !State->SelectedSibling.IsNone(); })
+                .IsEnabled_Lambda([State] { return FOriginHierarchyAuthoring::CanEdit(State->Component.Get()) &&
+                    State->MovableSiblings.Contains(State->SelectedSibling); })
                 .OnClicked_Lambda([State] { return State->Restructure(0); })];
 
         TSharedPtr<SComboBox<TSharedPtr<FName>>> ChildSelector;
@@ -861,7 +1023,10 @@ void FOriginPivotComponentDetails::CustomizeDetails(IDetailLayoutBuilder& Builde
                 })
                 .Content()[SNew(STextBlock).Text_Lambda([State]
                 {
-                    return State->SelectedChild.IsNone() ? LOCTEXT("NoChild", "No eligible child") : FText::FromName(State->SelectedChild);
+                    if (State->SelectedChild.IsNone()) return LOCTEXT("NoChild", "No eligible child");
+                    return State->SocketInsertChildren.Contains(State->SelectedChild)
+                        ? FText::Format(LOCTEXT("SocketChildSelection", "{0} (socket-attached)"), FText::FromName(State->SelectedChild))
+                        : FText::FromName(State->SelectedChild);
                 })]];
         State->ChildCombo = ChildSelector;
         Hierarchy.AddWidgetRow().WholeRowContent()
@@ -870,12 +1035,13 @@ void FOriginPivotComponentDetails::CustomizeDetails(IDetailLayoutBuilder& Builde
                 [SNew(SButton)
                     .Text(LOCTEXT("PromoteChild", "Promote To Parent"))
                     .ToolTipText(LOCTEXT("PromoteTip", "Reparent the selected direct child to this pivot's parent, without deleting the pivot."))
-                    .IsEnabled_Lambda([State] { return FOriginHierarchyAuthoring::CanEdit(State->Component.Get()) && !State->SelectedChild.IsNone(); })
+                    .IsEnabled_Lambda([State] { return FOriginHierarchyAuthoring::CanEdit(State->Component.Get()) &&
+                        State->MovableChildren.Contains(State->SelectedChild); })
                     .OnClicked_Lambda([State] { return State->Restructure(1); })]
                 + SHorizontalBox::Slot().FillWidth(1).Padding(0, 2, 0, 2)
                 [SNew(SButton)
                     .Text(LOCTEXT("InsertPivot", "Insert Pivot Above"))
-                    .ToolTipText(LOCTEXT("InsertPivotTip", "Create a new Origin Pivot directly between the selected child and this pivot. Place the new pivot at the child's origin without moving the branch."))
+                    .ToolTipText(LOCTEXT("InsertPivotTip", "Insert an Origin Pivot without moving the branch. If the selected child uses a socket, its socket attachment is moved onto the new Pivot, preserving that moving socket frame."))
                     .IsEnabled_Lambda([State] { return FOriginHierarchyAuthoring::CanEdit(State->Component.Get()) && !State->SelectedChild.IsNone(); })
                     .OnClicked_Lambda([State] { return State->Restructure(2); })]];
     }
@@ -884,7 +1050,7 @@ void FOriginPivotComponentDetails::CustomizeDetails(IDetailLayoutBuilder& Builde
     {
         TSharedPtr<SComboBox<TSharedPtr<FName>>> TransferSelector;
         IDetailGroup& Batch = Category.AddGroup(TEXT("OriginHierarchyBatch"),
-            LOCTEXT("BatchAuthoringGroup", "Multi-Component Hierarchy Authoring"), false, true);
+            LOCTEXT("BatchAuthoringGroup", "Batch Hierarchy Operations"), false, false);
         Batch.AddWidgetRow().WholeRowContent()
             [SNew(STextBlock)
                 .Text(LOCTEXT("BatchHelp", "Choose multiple authored SCS components. Every selected component must be valid; each operation applies as one Undo step or changes nothing. Detach moves components to the authored Blueprint root, not out of the Actor."))
@@ -903,9 +1069,16 @@ void FOriginPivotComponentDetails::CustomizeDetails(IDetailLayoutBuilder& Builde
             [SNew(SButton)
                 .Text(LOCTEXT("BatchReparent", "Reparent Selected Siblings To This Pivot"))
                 .ToolTipText(LOCTEXT("BatchReparentTip", "Move all selected direct siblings beneath this Pivot, preserving every branch, in one Undo step."))
-                .IsEnabled_Lambda([State] { return !State->BatchSiblings.IsEmpty() &&
+                .IsEnabled_Lambda([State] { return State->AreBatchSiblingsMovable() &&
                     FOriginHierarchyAuthoring::CanEdit(State->Component.Get()); })
                 .OnClicked_Lambda([State] { return State->BatchRestructure(0); })];
+        Batch.AddWidgetRow().WholeRowContent()
+            [SNew(SButton)
+                .Text(LOCTEXT("BatchSocketSiblingGroup", "Create New Pivot for Selection"))
+                .ToolTipText(LOCTEXT("BatchSocketSiblingGroupTip", "Create a new Pivot below the common authored parent and group selected siblings. If they use a socket on that parent, all must use the same socket. The new Pivot takes that exact socket and the original components retain their placement and descendants."))
+                .IsEnabled_Lambda([State] { return !State->BatchSiblings.IsEmpty() &&
+                    FOriginHierarchyAuthoring::CanEdit(State->Component.Get()); })
+                .OnClicked_Lambda([State] { return State->BatchRestructure(5); })];
         Batch.AddWidgetRow()
             .NameContent()[SNew(STextBlock).Text(LOCTEXT("BatchChildLabel", "Children To Restructure"))]
             .ValueContent().MinDesiredWidth(230.0f)
@@ -922,13 +1095,13 @@ void FOriginPivotComponentDetails::CustomizeDetails(IDetailLayoutBuilder& Builde
                 [SNew(SButton)
                     .Text(LOCTEXT("BatchPromote", "Promote Selected"))
                     .ToolTipText(LOCTEXT("BatchPromoteTip", "Move all selected direct children to this Pivot's parent, retaining their world placement."))
-                    .IsEnabled_Lambda([State] { return !State->BatchChildren.IsEmpty() &&
+                    .IsEnabled_Lambda([State] { return State->AreBatchChildrenMovable() &&
                         FOriginHierarchyAuthoring::CanEdit(State->Component.Get()); })
                     .OnClicked_Lambda([State] { return State->BatchRestructure(1); })]
                 + SHorizontalBox::Slot().FillWidth(1).Padding(0, 2, 0, 2)
                 [SNew(SButton)
                     .Text(LOCTEXT("BatchInsertShared", "Insert Shared Pivot"))
-                    .ToolTipText(LOCTEXT("BatchInsertSharedTip", "Insert one new Pivot above all selected direct children, at their average authored origin."))
+                    .ToolTipText(LOCTEXT("BatchInsertSharedTip", "Insert one shared Pivot at the average origin. Socket-attached children are supported when every selected child uses the same socket; different sockets are rejected atomically."))
                     .IsEnabled_Lambda([State] { return !State->BatchChildren.IsEmpty() &&
                         FOriginHierarchyAuthoring::CanEdit(State->Component.Get()); })
                     .OnClicked_Lambda([State] { return State->BatchRestructure(3); })]];
@@ -956,7 +1129,7 @@ void FOriginPivotComponentDetails::CustomizeDetails(IDetailLayoutBuilder& Builde
             [SNew(SButton)
                 .Text(LOCTEXT("BatchTransfer", "Transfer Selected Children To Pivot"))
                 .ToolTipText(LOCTEXT("BatchTransferTip", "Move selected direct children to another authored Origin Pivot in this Blueprint. Keeps complete branches in place, rejects cycles, sockets and unsafe inherited transforms, and performs one Undo transaction."))
-                .IsEnabled_Lambda([State] { return !State->BatchChildren.IsEmpty() &&
+                .IsEnabled_Lambda([State] { return State->AreBatchChildrenMovable() &&
                     !State->SelectedTransferTarget.IsNone() &&
                     FOriginHierarchyAuthoring::CanEdit(State->Component.Get()); })
                 .OnClicked_Lambda([State] { return State->BatchRestructure(4); })];
@@ -964,86 +1137,63 @@ void FOriginPivotComponentDetails::CustomizeDetails(IDetailLayoutBuilder& Builde
             [SNew(SButton)
                 .Text(LOCTEXT("BatchDetachToRoot", "Detach Selected Children To Blueprint Root"))
                 .ToolTipText(LOCTEXT("BatchDetachTip", "Move selected direct children under the authored Blueprint scene root, without moving them in the Actor. Rejects inherited, socket or absolute-transform paths."))
-                .IsEnabled_Lambda([State] { return !State->BatchChildren.IsEmpty() &&
+                .IsEnabled_Lambda([State] { return State->AreBatchChildrenMovable() &&
                     FOriginHierarchyAuthoring::CanEdit(State->Component.Get()); })
                 .OnClicked_Lambda([State] { return State->BatchRestructure(2); })];
     }
 
-    Category.AddCustomRow(LOCTEXT("PivotDescriptionSearch", "Pivot help"))
-        .WholeRowContent()
-        [SNew(STextBlock)
-            .Text(LOCTEXT("PivotHelp", "Normal component movement moves the assembly. Editing the pivot below moves its control point while preserving attached world transforms."))
-            .AutoWrapText(true)];
-
-    IDetailGroup& Edit = Category.AddGroup(TEXT("OriginPivotEdit"), LOCTEXT("EditPivotGroup", "Edit Pivot"), false, true);
-    Edit.AddWidgetRow().WholeRowContent()
-        [SNew(SButton)
-            .Text_Lambda([WeakPivot]
-            {
-                return FOriginPivotViewportMode::IsEditing(WeakPivot.Get())
-                    ? LOCTEXT("FinishViewportPivot", "Finish Viewport Pivot Editing")
-                    : LOCTEXT("BeginViewportPivot", "Edit Pivot in Viewport");
-            })
-            .ToolTipText(LOCTEXT("ViewportPivotTip", "Uses native Translate (W) and Rotate (E) widgets. In Blueprints this edits authored SCS templates (not just the preview); in levels it preserves attached actors and components. One Undo step per drag. Scale is unavailable."))
-            .IsEnabled_Lambda([State] { return State->CanEdit(); })
-            .OnClicked_Lambda([WeakPivot, State]
-            {
-                if (UOriginPivotComponent* Component = WeakPivot.Get())
+    else if (FOriginHierarchyAuthoring::CanGroupExternalParentSiblings(State->Component.Get()))
+    {
+        // ACharacter::Mesh, inherited Skeletal Meshes, and other native Scene
+        // Components are not SCS nodes. Show the operation that is safe for
+        // that topology instead of hiding all authoring controls.
+        IDetailGroup& External = Category.AddGroup(TEXT("OriginExternalHierarchyBatch"),
+            LOCTEXT("ExternalHierarchyGroup", "Blueprint Hierarchy"), false, false);
+        External.AddWidgetRow().WholeRowContent()
+            [SNew(STextBlock)
+                .Text(LOCTEXT("ExternalHierarchyHelp", "Native/inherited parent. Select components sharing the same socket (or all with no socket). Add them to this empty Pivot, or create another Pivot. Native components are never modified."))
+                .AutoWrapText(true)];
+        External.AddWidgetRow()
+            .NameContent()[SNew(STextBlock).Text(LOCTEXT("ExternalSiblingsLabel", "Sibling Components"))]
+            .ValueContent().MinDesiredWidth(230.0f)
+            [SNew(SComboButton)
+                .OnGetMenuContent_Lambda([State] { return State->MakeBatchSelectionMenu(true); })
+                .ButtonContent()[SNew(STextBlock).Text_Lambda([State]
                 {
-                    // Pending typed offsets must never be carried into an active
-                    // viewport edit and accidentally re-applied afterward.
-                    State->TranslationDelta = FVector::ZeroVector;
-                    State->RotationDelta = FRotator::ZeroRotator;
-                    FOriginPivotViewportMode::Toggle(Component);
-                }
-                return FReply::Handled();
-            })];
-    Edit.AddWidgetRow().WholeRowContent()
-        [SNew(STextBlock)
-            .Text_Lambda([WeakPivot]
-            {
-                return FOriginPivotViewportMode::IsEditing(WeakPivot.Get())
-                    ? LOCTEXT("ViewportActiveHint", "Viewport editing active. The numbers below show offsets already applied since entering this mode (read-only). W: move, E: rotate. Esc: cancel current drag and exit.")
-                    : LOCTEXT("ViewportInactiveHint", "Select this Origin Pivot component in a level or Blueprint Components tree to edit its pivot directly.");
-            })
-            .AutoWrapText(true)];
-    Edit.AddWidgetRow()
-        .NameContent()[SNew(STextBlock)
-            .Text(LOCTEXT("PositionDelta", "Move Pivot (cm)"))
-            .ToolTipText(LOCTEXT("PositionDeltaTip", "Pivot translation offset (world space for placed components, parent-relative for Blueprint templates)."))]
-        .ValueContent().MinDesiredWidth(240.0f)[MakeDeltaFields(State, false)];
-    Edit.AddWidgetRow()
-        .NameContent()[SNew(STextBlock)
-            .Text(LOCTEXT("RotationDelta", "Rotate Pivot (degrees)"))
-            .ToolTipText(LOCTEXT("RotationDeltaTip", "Pivot rotation offset (world space for placed components, parent-relative for Blueprint templates)."))]
-        .ValueContent().MinDesiredWidth(240.0f)[MakeDeltaFields(State, true)];
-    Edit.AddWidgetRow().WholeRowContent()
-        [SNew(SHorizontalBox)
-            + SHorizontalBox::Slot().FillWidth(1.0f).Padding(0, 3, 6, 0)
-            [SNew(SButton)
-                .Text(LOCTEXT("Apply", "Apply Pivot Edit"))
-                .ToolTipText(LOCTEXT("ApplyTip", "Apply the offset as a single Undo transaction. Attached Actors and Components retain their world transforms."))
-                .IsEnabled_Lambda([State] { return State->CanEditNumeric() && State->HasDelta(); })
-                .OnClicked_Lambda([State] { return State->Apply(); })]
-            + SHorizontalBox::Slot().AutoWidth().Padding(0, 3, 0, 0)
-            [SNew(SButton)
-                .Text(LOCTEXT("Reset", "Clear"))
-                .IsEnabled_Lambda([State] { return State->CanEditNumeric() && State->HasDelta(); })
-                .OnClicked_Lambda([State]
-                {
-                    State->TranslationDelta = FVector::ZeroVector;
-                    State->RotationDelta = FRotator::ZeroRotator;
-                    return FReply::Handled();
+                    return FText::Format(LOCTEXT("ExternalSiblingCount", "{0} selected"),
+                        FText::AsNumber(State->BatchSiblings.Num()));
                 })]];
-    Edit.AddWidgetRow().WholeRowContent()
-        [SNew(STextBlock)
-            .Text_Lambda([State]
-            {
-                return State->CanEdit()
-                    ? LOCTEXT("DeltaHelp", "Numeric offsets apply only when you click Apply. During viewport editing they display live, already-applied offsets and cannot be entered or applied twice. Pivot scale remains unchanged.")
-                    : LOCTEXT("DeltaUnavailable", "Edit Pivot supports placed, movable components and Blueprint-owned SCS templates. Inherited/native component defaults, unsupported scales, and Play In Editor are intentionally excluded.");
-            })
-            .AutoWrapText(true)];
+        External.AddWidgetRow().WholeRowContent()
+            [SNew(SButton)
+                .Text(LOCTEXT("ExternalAdoptSelection", "Add Selection to This Pivot"))
+                .ToolTipText(LOCTEXT("ExternalAdoptSelectionTip", "Reuse this selected, empty Origin Pivot. It takes the common socket of the selected siblings and moves to their average position; children retain their placement. Does not create another Pivot. Disabled if this Pivot already has authored children or saved poses."))
+                .IsEnabled_Lambda([State]
+                {
+                    return !State->BatchSiblings.IsEmpty() &&
+                        FOriginHierarchyAuthoring::CanAdoptExternalParentSiblings(State->Component.Get());
+                })
+                .OnClicked_Lambda([State] { return State->BatchRestructure(6); })];
+        External.AddWidgetRow().WholeRowContent()
+            [SNew(SButton)
+                .Text(LOCTEXT("ExternalGroupSiblings", "Create New Pivot for Selection"))
+                .ToolTipText(LOCTEXT("ExternalGroupSiblingsTip", "Creates an additional Origin Pivot and leaves the selected Pivot untouched. All selected authored components become children of the new Pivot, retaining their common socket frame. One Undo step."))
+                .IsEnabled_Lambda([State]
+                {
+                    return !State->BatchSiblings.IsEmpty() &&
+                        FOriginHierarchyAuthoring::CanGroupExternalParentSiblings(State->Component.Get());
+                })
+                .OnClicked_Lambda([State] { return State->BatchRestructure(5); })];
+    }
+    else if (State->Component.IsValid() && State->Component->IsTemplate())
+    {
+        Category.AddCustomRow(LOCTEXT("UnavailableHierarchySearch", "Blueprint hierarchy availability"))
+            .WholeRowContent()
+            [SNew(STextBlock)
+                .Text(LOCTEXT("UnavailableHierarchyHelp", "Blueprint hierarchy editing is unavailable for this Pivot. The Pivot must be authored in the current Blueprint under a supported Scene Component. Native/inherited Pivot templates, socket-attached reference Pivots, and absolute-transform parent paths are protected."))
+                .AutoWrapText(true)];
+    }
+
+
 }
 
 #undef LOCTEXT_NAMESPACE

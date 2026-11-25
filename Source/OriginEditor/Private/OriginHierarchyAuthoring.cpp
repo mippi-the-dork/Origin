@@ -118,8 +118,109 @@ namespace
         return true;
     }
 
-    bool SceneNodeInBranch(USCS_Node* Node, USCS_Node* ExpectedParent, USimpleConstructionScript* SCS,
+    // An authored SCS node under a native/inherited component is represented as
+    // a root SCS node with external-parent metadata. FindParentNode() is null:
+    // the native Mesh is NOT an authored USCS_Node and must never be reparented.
+    struct FExternalParentContext
+    {
+        UBlueprint* Blueprint = nullptr;
+        USimpleConstructionScript* SCS = nullptr;
+        USCS_Node* PivotNode = nullptr;
+        UOriginPivotComponent* Pivot = nullptr;
+        USceneComponent* ParentTemplate = nullptr;
+    };
+
+    bool ResolveExternalParentContext(UOriginPivotComponent* Pivot, FExternalParentContext& Out,
         FText& Reason)
+    {
+        Out = FExternalParentContext();
+        if (!IsValid(Pivot) || !GEditor || GEditor->PlayWorld ||
+            FOriginPivotViewportMode::IsEditing(Pivot))
+        {
+            Reason = LOCTEXT("ExternalParentBusy", "Finish viewport editing and exit PIE before editing Blueprint hierarchy.");
+            return false;
+        }
+        UBlueprint* BP = nullptr;
+        USCS_Node* PivotNode = nullptr;
+        if (!OriginBlueprintPivot::Resolve(Pivot, BP, PivotNode) || !IsValid(BP) ||
+            !IsValid(BP->SimpleConstructionScript) || !IsValid(PivotNode))
+        {
+            Reason = LOCTEXT("ExternalParentAuthoredOnly", "Select an Origin Pivot authored in this Blueprint, not a native or inherited Pivot.");
+            return false;
+        }
+        USimpleConstructionScript* SCS = BP->SimpleConstructionScript;
+        if (SCS->FindParentNode(PivotNode) || !SCS->GetRootNodes().Contains(PivotNode) ||
+            PivotNode->ParentComponentOrVariableName.IsNone())
+        {
+            Reason = LOCTEXT("ExternalParentNotRoot", "The selected Pivot is not an authored SCS root attached to a native or inherited parent.");
+            return false;
+        }
+        USceneComponent* NativeOrInheritedParent = PivotNode->GetParentComponentTemplate(BP);
+        if (!IsValid(NativeOrInheritedParent) || HasAbsoluteAxes(NativeOrInheritedParent) ||
+            HasAbsoluteAxes(Pivot) || !PivotNode->AttachToName.IsNone() ||
+            !Pivot->GetAttachSocketName().IsNone())
+        {
+            Reason = LOCTEXT("ExternalParentUnsupported", "The external parent must resolve to a safe Scene Component, and the reference Pivot must not use absolute axes or a socket attachment.");
+            return false;
+        }
+        const FVector ParentScale = NativeOrInheritedParent->GetRelativeScale3D();
+        if (ParentScale.GetMin() <= KINDA_SMALL_NUMBER ||
+            !FMath::IsNearlyEqual(ParentScale.X, ParentScale.Y, 1.e-5) ||
+            !FMath::IsNearlyEqual(ParentScale.Y, ParentScale.Z, 1.e-5))
+        {
+            Reason = LOCTEXT("ExternalParentScale", "The native or inherited parent has nonuniform or nonpositive scale. Origin cannot safely group these components.");
+            return false;
+        }
+        Out.Blueprint = BP;
+        Out.SCS = SCS;
+        Out.PivotNode = PivotNode;
+        Out.Pivot = Pivot;
+        Out.ParentTemplate = NativeOrInheritedParent;
+        return true;
+    }
+
+    bool IsEligibleExternalSibling(const FExternalParentContext& Context, USCS_Node* Candidate,
+        FText& Reason)
+    {
+        if (!IsValid(Candidate) || Candidate == Context.PivotNode ||
+            Candidate->GetSCS() != Context.SCS ||
+            Context.SCS->FindParentNode(Candidate) ||
+            !Context.SCS->GetRootNodes().Contains(Candidate) ||
+            Candidate->ParentComponentOrVariableName != Context.PivotNode->ParentComponentOrVariableName ||
+            Candidate->ParentComponentOwnerClassName != Context.PivotNode->ParentComponentOwnerClassName ||
+            Candidate->bIsParentComponentNative != Context.PivotNode->bIsParentComponentNative ||
+            Candidate->GetParentComponentTemplate(Context.Blueprint) != Context.ParentTemplate)
+        {
+            Reason = LOCTEXT("ExternalParentDifferent", "All selected components must be directly authored under the same native or inherited parent, with identical attachment ownership.");
+            return false;
+        }
+        const USceneComponent* Template = Cast<USceneComponent>(Candidate->ComponentTemplate.Get());
+        if (!IsValid(Template) || HasAbsoluteAxes(Template) ||
+            !Template->GetAttachSocketName().IsNone() ||
+            !Template->GetRelativeTransform().IsValid() ||
+            Template->GetRelativeTransform().ContainsNaN())
+        {
+            Reason = LOCTEXT("ExternalParentInvalidChild", "An authored sibling has absolute axes, a template-level socket, or an invalid transform.");
+            return false;
+        }
+        return true;
+    }
+
+    // Existing saved local-space poses capture the socket that was active at
+    // the time of capture. Automatically changing a Pivot's socket must not
+    // silently invalidate them. Creating a new Pivot leaves them untouched.
+    bool HasAuthoredPivotPoses(const UOriginPivotComponent* Pivot)
+    {
+        if (!IsValid(Pivot)) return true;
+        if (Pivot->OriginPivotConfiguration.Slots.Num() > 1 ||
+            Pivot->OriginPivotConfiguration.ActiveSlotName != FName(TEXT("Default"))) return true;
+        for (const FOriginPivotSlot& Slot : Pivot->OriginPivotConfiguration.Slots)
+            if (Slot.bHasSavedRelativeTransform) return true;
+        return false;
+    }
+
+    bool SceneNodeInBranch(USCS_Node* Node, USCS_Node* ExpectedParent, USimpleConstructionScript* SCS,
+        FText& Reason, bool bAllowSocketHandoff = false)
     {
         if (!IsValid(Node) || !IsValid(SCS) || SCS->FindParentNode(Node) != ExpectedParent ||
             !IsValid(Node->ComponentTemplate) ||
@@ -134,9 +235,20 @@ namespace
             Reason = LOCTEXT("AbsoluteChild", "This component uses absolute location, rotation or scale. It cannot be safely reparented by Origin.");
             return false;
         }
-        if (!Node->AttachToName.IsNone() || !ChildTemplate->GetAttachSocketName().IsNone())
+        // SCS AttachToName is an authored socket/bone name on this node's
+        // current parent. Ordinary reparenting cannot preserve that animated
+        // frame. Insertion is different: the newly inserted Origin Pivot can
+        // inherit the SAME attachment to the SAME parent, and the child then
+        // becomes a socket-free child of the new Pivot. Never reinterpret a
+        // separate component-template socket attachment.
+        if (!ChildTemplate->GetAttachSocketName().IsNone())
         {
-            Reason = LOCTEXT("SocketAttachment", "Socket or bone attachments are not yet supported for hierarchy authoring. No changes were made.");
+            Reason = LOCTEXT("TemplateSocketAttachment", "This component has a template-level socket attachment that Origin cannot safely transfer. No changes were made.");
+            return false;
+        }
+        if (!bAllowSocketHandoff && !Node->AttachToName.IsNone())
+        {
+            Reason = LOCTEXT("SocketAttachment", "Reparenting a socket-attached component would change its socket frame. Use Insert Pivot Above instead, or leave its socket attachment unchanged.");
             return false;
         }
         return true;
@@ -194,7 +306,8 @@ namespace
      * is still observable; never use an editor preview component as source of truth.
      */
     FString DiagnoseInsertion(const FContext& Context, USCS_Node* NewNode,
-        USCS_Node* ChildNode, const FTransform& ChildBefore, const FTransform& NewPivotRelative)
+        USCS_Node* ChildNode, const FTransform& ChildBefore, const FTransform& NewPivotRelative,
+        FName OriginalSocket)
     {
         USCS_Node* ActualPivotParent = Context.SCS->FindParentNode(NewNode);
         if (ActualPivotParent != Context.PivotNode)
@@ -216,6 +329,11 @@ namespace
         {
             return FString::Printf(TEXT("Inserted pivot or child '%s' has no valid scene component template"),
                 *DescribeSCSNode(ChildNode));
+        }
+        if (NewNode->AttachToName != OriginalSocket || !ChildNode->AttachToName.IsNone())
+        {
+            return FString::Printf(TEXT("Socket handoff mismatch: expected inserted socket '%s', got '%s', child socket '%s'"),
+                *OriginalSocket.ToString(), *NewNode->AttachToName.ToString(), *ChildNode->AttachToName.ToString());
         }
         if (!InsertedPivot->GetRelativeTransform().Equals(NewPivotRelative, 1.e-3))
         {
@@ -239,6 +357,33 @@ namespace
         // components or source template pointers after this call.
         FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(Context.Blueprint);
     }
+}
+
+bool FOriginHierarchyAuthoring::CanGroupExternalParentSiblings(UOriginPivotComponent* Pivot)
+{
+    FExternalParentContext Context;
+    FText Reason;
+    return ResolveExternalParentContext(Pivot, Context, Reason);
+}
+
+void FOriginHierarchyAuthoring::ListExternalParentSiblings(UOriginPivotComponent* Pivot,
+    TArray<FName>& OutAll, TArray<FName>& OutSocketAttached)
+{
+    OutAll.Reset();
+    OutSocketAttached.Reset();
+    FExternalParentContext Context;
+    FText Reason;
+    if (!ResolveExternalParentContext(Pivot, Context, Reason)) return;
+    for (USCS_Node* Candidate : Context.SCS->GetRootNodes())
+    {
+        if (IsEligibleExternalSibling(Context, Candidate, Reason))
+        {
+            OutAll.Add(Candidate->GetVariableName());
+            if (!Candidate->AttachToName.IsNone()) OutSocketAttached.Add(Candidate->GetVariableName());
+        }
+    }
+    OutAll.Sort([](FName A, FName B) { return A.LexicalLess(B); });
+    OutSocketAttached.Sort([](FName A, FName B) { return A.LexicalLess(B); });
 }
 
 bool FOriginHierarchyAuthoring::CanEdit(UOriginPivotComponent* Pivot)
@@ -277,6 +422,41 @@ void FOriginHierarchyAuthoring::ListSiblingsAndChildren(UOriginPivotComponent* P
     OutChildren.Sort([](const FName& A, const FName& B) { return A.LexicalLess(B); });
 }
 
+void FOriginHierarchyAuthoring::ListInsertableSiblings(UOriginPivotComponent* Pivot,
+    TArray<FName>& OutSiblings)
+{
+    OutSiblings.Reset();
+    FContext Context;
+    FText Reason;
+    if (!ResolveContext(Pivot, Context, Reason)) return;
+    for (USCS_Node* Node : Context.ParentNode->GetChildNodes())
+    {
+        if (Node == Context.PivotNode) continue;
+        if (SceneNodeInBranch(Node, Context.ParentNode, Context.SCS, Reason, true) &&
+            Cast<USceneComponent>(Node->ComponentTemplate.Get())->GetRelativeTransform().IsValid() &&
+            !Cast<USceneComponent>(Node->ComponentTemplate.Get())->GetRelativeTransform().ContainsNaN())
+            OutSiblings.Add(Node->GetVariableName());
+    }
+    OutSiblings.Sort([](const FName& A, const FName& B) { return A.LexicalLess(B); });
+}
+
+void FOriginHierarchyAuthoring::ListInsertableChildren(UOriginPivotComponent* Pivot,
+    TArray<FName>& OutChildren)
+{
+    OutChildren.Reset();
+    FContext Context;
+    FText Reason;
+    if (!ResolveContext(Pivot, Context, Reason)) return;
+    for (USCS_Node* Child : Context.PivotNode->GetChildNodes())
+    {
+        if (SceneNodeInBranch(Child, Context.PivotNode, Context.SCS, Reason, true) &&
+            Cast<USceneComponent>(Child->ComponentTemplate.Get())->GetRelativeTransform().IsValid() &&
+            !Cast<USceneComponent>(Child->ComponentTemplate.Get())->GetRelativeTransform().ContainsNaN())
+            OutChildren.Add(Child->GetVariableName());
+    }
+    OutChildren.Sort([](const FName& A, const FName& B) { return A.LexicalLess(B); });
+}
+
 bool FOriginHierarchyAuthoring::AdoptSibling(UOriginPivotComponent* Pivot,
     FName SiblingVariable, FText& Reason)
 {
@@ -297,7 +477,8 @@ bool FOriginHierarchyAuthoring::InsertPivotAboveChild(UOriginPivotComponent* Piv
     FContext Context;
     if (!ResolveContext(Pivot, Context, Reason)) return false;
     USCS_Node* ChildNode = Context.SCS->FindSCSNode(ChildVariable);
-    if (!SceneNodeInBranch(ChildNode, Context.PivotNode, Context.SCS, Reason)) return false;
+    if (!SceneNodeInBranch(ChildNode, Context.PivotNode, Context.SCS, Reason, true)) return false;
+    const FName OriginalSocket = ChildNode->AttachToName;
     USceneComponent* Child = Cast<USceneComponent>(ChildNode->ComponentTemplate.Get());
     if (!IsValid(Child)) return false;
     const FTransform ChildBefore = Child->GetRelativeTransform();
@@ -340,6 +521,10 @@ bool FOriginHierarchyAuthoring::InsertPivotAboveChild(UOriginPivotComponent* Piv
     Context.PivotNode->RemoveChildNode(ChildNode, false);
     Context.PivotNode->AddChildNode(NewNode, true); // This is a new SCS node.
     NewNode->AddChildNode(ChildNode, false);        // Child already exists in SCS AllNodes.
+    // Preserve the socket frame on the newly inserted node. This is an
+    // exact metadata handoff, NOT an approximation of a skeletal bone pose.
+    NewNode->AttachToName = OriginalSocket;
+    ChildNode->AttachToName = NAME_None;
 
     // Record the pre-write state so a failed validation can distinguish a
     // compensation-plan error from an authored template that rejects or loses
@@ -383,7 +568,7 @@ bool FOriginHierarchyAuthoring::InsertPivotAboveChild(UOriginPivotComponent* Piv
     else
     {
         InsertionFailure = DiagnoseInsertion(Context, NewNode, ChildNode,
-            ChildBefore, NewPivotRelative);
+            ChildBefore, NewPivotRelative, OriginalSocket);
     }
     if (!InsertionFailure.IsEmpty())
     {
@@ -412,6 +597,7 @@ bool FOriginHierarchyAuthoring::InsertPivotAboveChild(UOriginPivotComponent* Piv
         NewNode->RemoveChildNode(ChildNode, false);
         Context.PivotNode->RemoveChildNode(NewNode, true);
         Context.PivotNode->AddChildNode(ChildNode, false);
+        ChildNode->AttachToName = OriginalSocket;
         if (USceneComponent* RestoredChild = Cast<USceneComponent>(ChildNode->ComponentTemplate.Get()))
             SetAuthoredTemplateRelative(RestoredChild, ChildBefore, TEXT("Insert rollback"));
         Transaction.Cancel();
@@ -422,7 +608,8 @@ bool FOriginHierarchyAuthoring::InsertPivotAboveChild(UOriginPivotComponent* Piv
         const bool bRestoredTransform = IsValid(VerifiedRestoredChild) &&
             VerifiedRestoredChild->GetRelativeTransform().Equals(ChildBefore, 1.e-3);
         const bool bRemovedNewNode = Context.SCS->FindSCSNode(NewName) == nullptr;
-        if (!bRestoredParent || !bRestoredTransform || !bRemovedNewNode)
+        const bool bRestoredSocket = ChildNode->AttachToName == OriginalSocket;
+        if (!bRestoredParent || !bRestoredTransform || !bRemovedNewNode || !bRestoredSocket)
         {
             UE_LOG(LogOriginHierarchyAuthoring, Error,
                 TEXT("Insertion rollback was incomplete: child parent restored=%d, transform restored=%d, new node removed=%d. Do not save this Blueprint before reloading."),
@@ -454,6 +641,7 @@ namespace
         USCS_Node* OldParent = nullptr;
         USCS_Node* NewParent = nullptr;
         FTransform OriginalRelative;
+        FName OriginalSocket = NAME_None;
         FTransform PlannedRelative;
         FTransform BeforeInCommonFrame;
         FTransform OldParentInCommonFrame;
@@ -581,6 +769,7 @@ namespace
             Move.OldParent = Context.PivotNode;
             Move.NewParent = TargetNode;
             Move.OriginalRelative = Template->GetRelativeTransform();
+            Move.OriginalSocket = ChildNode->AttachToName;
             Move.OldParentInCommonFrame = SourceInRoot;
             Move.NewParentInCommonFrame = TargetInRoot;
             Move.BeforeInCommonFrame = Move.OriginalRelative * SourceInRoot;
@@ -637,6 +826,7 @@ namespace
             Move.OldParent = ExpectedParent;
             Move.NewParent = NewParent;
             Move.OriginalRelative = Template->GetRelativeTransform();
+            Move.OriginalSocket = Node->AttachToName;
             Move.OldParentInCommonFrame = Destination == EOriginBatchDestination::IntoPivot
                 ? FTransform::Identity : (Destination == EOriginBatchDestination::ToParent
                     ? Context.Pivot->GetRelativeTransform() : PivotInRoot);
@@ -690,6 +880,7 @@ namespace
                 Move.NewParent->RemoveChildNode(Move.Node, false);
             if (Context.SCS->FindParentNode(Move.Node) != Move.OldParent)
                 Move.OldParent->AddChildNode(Move.Node, false);
+            Move.Node->AttachToName = Move.OriginalSocket;
             if (USceneComponent* Template = Cast<USceneComponent>(Move.Node->ComponentTemplate.Get()))
                 SetAuthoredTemplateRelative(Template, Move.OriginalRelative, TEXT("Batch rollback"));
         }
@@ -697,7 +888,8 @@ namespace
         {
             const USceneComponent* Template = Cast<USceneComponent>(Move.Node->ComponentTemplate.Get());
             if (Context.SCS->FindParentNode(Move.Node) != Move.OldParent ||
-                !IsValid(Template) || !Template->GetRelativeTransform().Equals(Move.OriginalRelative, 1.e-3))
+                Move.Node->AttachToName != Move.OriginalSocket || !IsValid(Template) ||
+                !Template->GetRelativeTransform().Equals(Move.OriginalRelative, 1.e-3))
                 return false;
         }
         return true;
@@ -834,94 +1026,416 @@ bool FOriginHierarchyAuthoring::DetachChildrenToRoot(UOriginPivotComponent* Pivo
         LOCTEXT("BatchDetach", "Origin: Detach Blueprint Components To Root"), Reason);
 }
 
+namespace
+{
+    bool InsertSharedPivotAtParent(const FContext& Context, USCS_Node* DirectParent,
+        const TArray<FName>& Variables, FName& OutNewPivotVariable, FText& Reason)
+    {
+        OutNewPivotVariable = NAME_None;
+        if (Variables.IsEmpty())
+        {
+            Reason = LOCTEXT("SharedInsertEmpty", "Select one or more authored child components to insert a shared Pivot.");
+            return false;
+        }
+        // Socket-aware preflight: members must be direct, authored, safe and all
+        // attached to the SAME socket on their unchanged parent. Both names and transforms are
+        // evaluated in that identical socket frame. A mixed socket selection would
+        // otherwise attach the new Pivot to the wrong moving bone.
+        TArray<FOriginBatchMove> Moves;
+        TSet<FName> Unique;
+        FName SharedSocket = NAME_None;
+        bool bHaveSocket = false;
+        for (FName Name : Variables)
+        {
+            if (Name.IsNone() || Unique.Contains(Name))
+            {
+                Reason = LOCTEXT("SharedInsertDuplicate", "The insertion selection contains an empty or duplicate component variable.");
+                return false;
+            }
+            Unique.Add(Name);
+            USCS_Node* Node = Context.SCS->FindSCSNode(Name);
+            if (Node == Context.PivotNode)
+            {
+                Reason = LOCTEXT("SharedInsertSourcePivot", "The active Origin Pivot cannot be included in its own sibling grouping operation.");
+                return false;
+            }
+            if (!SceneNodeInBranch(Node, DirectParent, Context.SCS, Reason, true)) return false;
+            const USceneComponent* Template = Cast<USceneComponent>(Node->ComponentTemplate.Get());
+            if (!IsValid(Template) || !Template->GetRelativeTransform().IsValid() ||
+                Template->GetRelativeTransform().ContainsNaN())
+            {
+                Reason = LOCTEXT("SharedInsertInvalid", "A selected child has an invalid authored transform.");
+                return false;
+            }
+            if (!bHaveSocket)
+            {
+                SharedSocket = Node->AttachToName;
+                bHaveSocket = true;
+            }
+            else if (SharedSocket != Node->AttachToName)
+            {
+                Reason = LOCTEXT("SharedInsertDifferentSockets", "A shared Pivot can only group components using the exact same socket (or all using none). Different moving socket frames cannot be merged without changing the assembly.");
+                return false;
+            }
+            FOriginBatchMove& Move = Moves.AddDefaulted_GetRef();
+            Move.Node = Node;
+            Move.OldParent = DirectParent;
+            Move.NewParent = nullptr;
+            Move.OriginalSocket = Node->AttachToName;
+            Move.OriginalRelative = Template->GetRelativeTransform();
+        }
+        // The new pivot is placed at the average local origin of the selected direct
+        // children, with the enclosing Pivot's orientation and unit scale.
+        FVector Mean = FVector::ZeroVector;
+        for (const FOriginBatchMove& Move : Moves) Mean += Move.OriginalRelative.GetLocation();
+        Mean /= Moves.Num();
+        const FTransform NewPivotRelative(FQuat::Identity, Mean, FVector::OneVector);
+        for (FOriginBatchMove& Move : Moves)
+        {
+            Move.NewParentInCommonFrame = NewPivotRelative;
+            Move.BeforeInCommonFrame = Move.OriginalRelative;
+            if (!ComputePreservedRelative(FTransform::Identity, NewPivotRelative,
+                Move.OriginalRelative, Move.PlannedRelative, Reason)) return false;
+            Move.NewParent = nullptr; // Assigned after the new node exists.
+        }
+        const FName NewName = Context.SCS->GenerateNewComponentName(
+            UOriginPivotComponent::StaticClass(), TEXT("OriginPivot"));
+        if (NewName.IsNone() || Context.SCS->FindSCSNode(NewName))
+        {
+            Reason = LOCTEXT("BatchInsertName", "Unreal could not generate a unique Origin Pivot variable name.");
+            return false;
+        }
+        FScopedTransaction Transaction(LOCTEXT("BatchInsertTransaction", "Origin: Insert Shared Blueprint Pivot"),
+            Context.Blueprint->GetOutermost() != GetTransientPackage());
+        // Pre-snapshot the authored children before creating or parenting anything.
+        TArray<FOriginBatchMove> InitialMoves = Moves;
+        for (FOriginBatchMove& Move : InitialMoves) Move.NewParent = DirectParent;
+        PrepareBatchTransaction(Context, InitialMoves);
+        USCS_Node* NewNode = Context.SCS->CreateNode(UOriginPivotComponent::StaticClass(), NewName);
+        UOriginPivotComponent* NewTemplate = IsValid(NewNode)
+            ? Cast<UOriginPivotComponent>(NewNode->ComponentTemplate.Get()) : nullptr;
+        if (!IsValid(NewTemplate))
+        {
+            Transaction.Cancel();
+            Reason = LOCTEXT("BatchInsertCreateFailed", "Unreal could not create a shared Origin Pivot component.");
+            return false;
+        }
+        NewNode->SetFlags(RF_Transactional);
+        NewNode->Modify();
+        NewTemplate->Modify();
+        if (!SetAuthoredTemplateRelative(NewTemplate, NewPivotRelative, TEXT("Shared pivot initial template")))
+        {
+            Transaction.Cancel();
+            Reason = LOCTEXT("BatchInsertTransformFailed", "Unreal rejected the new pivot's authored transform.");
+            return false;
+        }
+        DirectParent->AddChildNode(NewNode, true);
+        NewNode->AttachToName = SharedSocket;
+        int32 ChangedCount = 0;
+        for (FOriginBatchMove& Move : Moves)
+        {
+            Move.NewParent = NewNode;
+            DirectParent->RemoveChildNode(Move.Node, false);
+            NewNode->AddChildNode(Move.Node, false);
+            Move.Node->AttachToName = NAME_None;
+            ++ChangedCount;
+            USceneComponent* Template = Cast<USceneComponent>(Move.Node->ComponentTemplate.Get());
+            if (!IsValid(Template) ||
+                !SetAuthoredTemplateRelative(Template, Move.PlannedRelative, TEXT("Shared pivot child")) ||
+                Context.SCS->FindParentNode(Move.Node) != NewNode ||
+                NewNode->AttachToName != SharedSocket || !Move.Node->AttachToName.IsNone() ||
+                !(Template->GetRelativeTransform() * NewTemplate->GetRelativeTransform()).Equals(
+                    Move.OriginalRelative, 1.e-3))
+            {
+                const bool bRestored = RollbackBatchMoves(Context, Moves, ChangedCount);
+                DirectParent->RemoveChildNode(NewNode, true);
+                Transaction.Cancel();
+                const bool bNodeRemoved = !Context.SCS->FindSCSNode(NewName);
+                if (!bRestored || !bNodeRemoved)
+                {
+                    UE_LOG(LogOriginHierarchyAuthoring, Error,
+                        TEXT("Shared pivot rollback incomplete for '%s'; DO NOT SAVE."),
+                        *GetNameSafe(Context.Blueprint));
+                    Reason = LOCTEXT("SharedPivotRollbackFailed", "Shared pivot insertion failed and rollback was incomplete. Reopen the Blueprint without saving.");
+                }
+                else Reason = LOCTEXT("SharedPivotRejected", "Unreal rejected the shared pivot insertion. Original hierarchy restored.");
+                return false;
+            }
+        }
+        OutNewPivotVariable = NewName;
+        NotifyStructure(Context);
+        Reason = FText::GetEmpty();
+        return true;
+    }
+} // namespace
+
 bool FOriginHierarchyAuthoring::InsertSharedPivotAboveChildren(UOriginPivotComponent* Pivot,
     const TArray<FName>& Variables, FName& OutNewPivotVariable, FText& Reason)
 {
     OutNewPivotVariable = NAME_None;
     FContext Context;
     if (!ResolveContext(Pivot, Context, Reason)) return false;
-    if (Variables.Num() == 1) return InsertPivotAboveChild(Pivot, Variables[0], OutNewPivotVariable, Reason);
-    TArray<FOriginBatchMove> Moves;
-    if (!BuildBatchMoves(Context, Variables, EOriginBatchDestination::ToParent, Moves, Reason)) return false;
-    // The new pivot is placed at the average local origin of the selected direct
-    // children, with the enclosing Pivot's orientation and unit scale.
-    FVector Mean = FVector::ZeroVector;
-    for (const FOriginBatchMove& Move : Moves) Mean += Move.OriginalRelative.GetLocation();
-    Mean /= Moves.Num();
-    const FTransform NewPivotRelative(FQuat::Identity, Mean, FVector::OneVector);
-    for (FOriginBatchMove& Move : Moves)
+    if (Variables.Num() == 1)
+        return InsertPivotAboveChild(Pivot, Variables[0], OutNewPivotVariable, Reason);
+    return InsertSharedPivotAtParent(Context, Context.PivotNode, Variables, OutNewPivotVariable, Reason);
+}
+
+namespace
+{
+// The two explicit UI actions share one transactional implementation: create
+// a new Pivot, or consume the EMPTY selected Pivot as the group root.
+bool GroupExternalParentSiblingsInternal(UOriginPivotComponent* Pivot,
+    const TArray<FName>& Variables, FName& OutNewPivotVariable, FText& Reason, bool bReusePivot)
+{
+    OutNewPivotVariable = NAME_None;
+    FExternalParentContext Context;
+    if (!ResolveExternalParentContext(Pivot, Context, Reason)) return false;
+    if (Variables.IsEmpty())
     {
-        Move.NewParentInCommonFrame = NewPivotRelative;
-        Move.BeforeInCommonFrame = Move.OriginalRelative;
-        if (!ComputePreservedRelative(FTransform::Identity, NewPivotRelative,
-            Move.OriginalRelative, Move.PlannedRelative, Reason)) return false;
-        Move.NewParent = nullptr; // Assigned after the new node exists.
-    }
-    const FName NewName = Context.SCS->GenerateNewComponentName(
-        UOriginPivotComponent::StaticClass(), TEXT("OriginPivot"));
-    if (NewName.IsNone() || Context.SCS->FindSCSNode(NewName))
-    {
-        Reason = LOCTEXT("BatchInsertName", "Unreal could not generate a unique Origin Pivot variable name.");
+        Reason = LOCTEXT("ExternalGroupEmpty", "Select at least one authored sibling to group.");
         return false;
     }
-    FScopedTransaction Transaction(LOCTEXT("BatchInsertTransaction", "Origin: Insert Shared Blueprint Pivot"),
+
+    // The outer frame is a native/inherited component, not an SCS node. It is
+    // NEVER changed. All coordinates below are in the same parent/socket frame.
+    struct FExternalMove
+    {
+        USCS_Node* Node = nullptr;
+        FTransform OriginalRelative;
+        FTransform PlannedRelative;
+        FName OriginalSocket = NAME_None;
+        FName OriginalParentName = NAME_None;
+        FName OriginalOwnerName = NAME_None;
+        bool bOriginalNative = false;
+    };
+    TArray<FExternalMove> Moves;
+    TSet<FName> Seen;
+    FName SharedSocket = NAME_None;
+    bool bHasSocket = false;
+    FVector Average = FVector::ZeroVector;
+    for (FName Variable : Variables)
+    {
+        if (Variable.IsNone() || Seen.Contains(Variable))
+        {
+            Reason = LOCTEXT("ExternalGroupDuplicate", "Grouping selection contains an empty or duplicate component variable.");
+            return false;
+        }
+        Seen.Add(Variable);
+        USCS_Node* Node = Context.SCS->FindSCSNode(Variable);
+        if (!IsEligibleExternalSibling(Context, Node, Reason)) return false;
+        if (!bHasSocket) { SharedSocket = Node->AttachToName; bHasSocket = true; }
+        else if (SharedSocket != Node->AttachToName)
+        {
+            Reason = LOCTEXT("ExternalGroupMixedSockets", "All siblings must use exactly the same socket on the same native/inherited parent (or all use none). No changes made.");
+            return false;
+        }
+        const USceneComponent* Template = Cast<USceneComponent>(Node->ComponentTemplate.Get());
+        FExternalMove& Move = Moves.AddDefaulted_GetRef();
+        Move.Node = Node;
+        Move.OriginalRelative = Template->GetRelativeTransform();
+        Move.OriginalSocket = Node->AttachToName;
+        Move.OriginalParentName = Node->ParentComponentOrVariableName;
+        Move.OriginalOwnerName = Node->ParentComponentOwnerClassName;
+        Move.bOriginalNative = Node->bIsParentComponentNative;
+        Average += Move.OriginalRelative.GetLocation();
+    }
+    if (bReusePivot && (!Context.PivotNode->GetChildNodes().IsEmpty() ||
+        HasAuthoredPivotPoses(Context.Pivot)))
+    {
+        Reason = LOCTEXT("ExternalAdoptNotEmpty", "The selected Pivot already has authored children or saved poses. Use Create New Pivot to keep its assembly and saved socket frames unchanged.");
+        return false;
+    }
+    Average /= Moves.Num();
+    const FTransform NewPivotRelative(FQuat::Identity, Average, FVector::OneVector);
+    const FTransform OriginalPivotRelative = Context.Pivot->GetRelativeTransform();
+    const FName OriginalPivotSocket = Context.PivotNode->AttachToName;
+    for (FExternalMove& Move : Moves)
+        if (!ComputePreservedRelative(FTransform::Identity, NewPivotRelative,
+            Move.OriginalRelative, Move.PlannedRelative, Reason)) return false;
+
+    const FName NewName = bReusePivot ? Context.PivotNode->GetVariableName() :
+        Context.SCS->GenerateNewComponentName(UOriginPivotComponent::StaticClass(), TEXT("OriginPivot"));
+    if (NewName.IsNone() || (!bReusePivot && Context.SCS->FindSCSNode(NewName)))
+    {
+        Reason = LOCTEXT("ExternalGroupName", "Unreal could not resolve a unique Pivot component variable.");
+        return false;
+    }
+
+    FScopedTransaction Transaction(LOCTEXT("ExternalGroupTransaction", "Origin: Group Native-Parent Blueprint Siblings"),
         Context.Blueprint->GetOutermost() != GetTransientPackage());
-    // Pre-snapshot the authored children before creating or parenting anything.
-    TArray<FOriginBatchMove> InitialMoves = Moves;
-    for (FOriginBatchMove& Move : InitialMoves) Move.NewParent = Context.PivotNode;
-    PrepareBatchTransaction(Context, InitialMoves);
-    USCS_Node* NewNode = Context.SCS->CreateNode(UOriginPivotComponent::StaticClass(), NewName);
+    if (Context.Blueprint->GetOutermost() != GetTransientPackage())
+    {
+        Context.SCS->SaveToTransactionBuffer();
+        Context.PivotNode->SaveToTransactionBuffer();
+        for (const FExternalMove& Move : Moves) Move.Node->SaveToTransactionBuffer();
+    }
+    Context.Blueprint->Modify();
+    Context.SCS->Modify();
+    Context.PivotNode->Modify();
+    Context.Pivot->Modify();
+    for (const FExternalMove& Move : Moves)
+    {
+        Move.Node->Modify();
+        if (UActorComponent* Template = Move.Node->ComponentTemplate.Get()) Template->Modify();
+    }
+
+    USCS_Node* NewNode = bReusePivot ? Context.PivotNode :
+        Context.SCS->CreateNode(UOriginPivotComponent::StaticClass(), NewName);
     UOriginPivotComponent* NewTemplate = IsValid(NewNode)
         ? Cast<UOriginPivotComponent>(NewNode->ComponentTemplate.Get()) : nullptr;
     if (!IsValid(NewTemplate))
     {
         Transaction.Cancel();
-        Reason = LOCTEXT("BatchInsertCreateFailed", "Unreal could not create a shared Origin Pivot component.");
+        Reason = LOCTEXT("ExternalGroupCreate", "Unreal failed to create an Origin Pivot node.");
         return false;
     }
     NewNode->SetFlags(RF_Transactional);
     NewNode->Modify();
     NewTemplate->Modify();
-    if (!SetAuthoredTemplateRelative(NewTemplate, NewPivotRelative, TEXT("Shared pivot initial template")))
+    if (!SetAuthoredTemplateRelative(NewTemplate, NewPivotRelative, TEXT("External parent pivot initial")))
     {
+        if (bReusePivot)
+            SetAuthoredTemplateRelative(NewTemplate, OriginalPivotRelative, TEXT("External adoption setup rollback"));
         Transaction.Cancel();
-        Reason = LOCTEXT("BatchInsertTransformFailed", "Unreal rejected the new pivot's authored transform.");
+        Reason = LOCTEXT("ExternalGroupTransform", "Unreal rejected the Pivot's authored transform.");
         return false;
     }
-    Context.PivotNode->AddChildNode(NewNode, true);
-    int32 ChangedCount = 0;
-    for (FOriginBatchMove& Move : Moves)
+    if (!bReusePivot)
     {
-        Move.NewParent = NewNode;
-        Context.PivotNode->RemoveChildNode(Move.Node, false);
-        NewNode->AddChildNode(Move.Node, false);
-        ++ChangedCount;
-        USceneComponent* Template = Cast<USceneComponent>(Move.Node->ComponentTemplate.Get());
-        if (!IsValid(Template) ||
-            !SetAuthoredTemplateRelative(Template, Move.PlannedRelative, TEXT("Shared pivot child")) ||
-            Context.SCS->FindParentNode(Move.Node) != NewNode ||
-            !(Template->GetRelativeTransform() * NewTemplate->GetRelativeTransform()).Equals(
-                Move.OriginalRelative, 1.e-3))
+        NewNode->bIsParentComponentNative = Context.PivotNode->bIsParentComponentNative;
+        NewNode->ParentComponentOrVariableName = Context.PivotNode->ParentComponentOrVariableName;
+        NewNode->ParentComponentOwnerClassName = Context.PivotNode->ParentComponentOwnerClassName;
+    }
+    NewNode->AttachToName = SharedSocket;
+    if (!bReusePivot) Context.SCS->AddNode(NewNode);
+
+    int32 Moved = 0;
+    bool bSucceeded = Context.SCS->GetRootNodes().Contains(NewNode) &&
+        NewNode->GetParentComponentTemplate(Context.Blueprint) == Context.ParentTemplate;
+    if (bSucceeded)
+    {
+        for (FExternalMove& Move : Moves)
         {
-            const bool bRestored = RollbackBatchMoves(Context, Moves, ChangedCount);
-            Context.PivotNode->RemoveChildNode(NewNode, true);
-            Transaction.Cancel();
-            const bool bNodeRemoved = !Context.SCS->FindSCSNode(NewName);
-            if (!bRestored || !bNodeRemoved)
+            // RemoveNode removes a former SCS root from both RootNodes and
+            // AllNodes. Reattach with bAddToAllNodes=true: otherwise the tree
+            // looks correct in the Components panel but FindSCSNode, Blueprint
+            // compilation, template/preview selection and Undo cannot resolve
+            // the reparented children. (Alpha 5.8.1 regression.)
+            Context.SCS->RemoveNode(Move.Node, false);
+            NewNode->AddChildNode(Move.Node, true);
+            Move.Node->bIsParentComponentNative = false;
+            Move.Node->ParentComponentOrVariableName = NAME_None;
+            Move.Node->ParentComponentOwnerClassName = NAME_None;
+            Move.Node->AttachToName = NAME_None;
+            ++Moved;
+            USceneComponent* Template = Cast<USceneComponent>(Move.Node->ComponentTemplate.Get());
+            if (!IsValid(Template) ||
+                !SetAuthoredTemplateRelative(Template, Move.PlannedRelative, TEXT("External parent grouped child")) ||
+                Context.SCS->FindParentNode(Move.Node) != NewNode ||
+                Context.SCS->GetRootNodes().Contains(Move.Node) ||
+                !Context.SCS->GetAllNodes().Contains(Move.Node) ||
+                Context.SCS->FindSCSNode(Move.Node->GetVariableName()) != Move.Node ||
+                !Move.Node->AttachToName.IsNone() ||
+                !(Template->GetRelativeTransform() * NewTemplate->GetRelativeTransform()).Equals(
+                    Move.OriginalRelative, 1.e-3))
             {
-                UE_LOG(LogOriginHierarchyAuthoring, Error,
-                    TEXT("Shared pivot rollback incomplete for '%s'; DO NOT SAVE."),
-                    *GetNameSafe(Context.Blueprint));
-                Reason = LOCTEXT("SharedPivotRollbackFailed", "Shared pivot insertion failed and rollback was incomplete. Reopen the Blueprint without saving.");
+                bSucceeded = false;
+                break;
             }
-            else Reason = LOCTEXT("SharedPivotRejected", "Unreal rejected the shared pivot insertion. Original hierarchy restored.");
-            return false;
         }
     }
+    if (!bSucceeded)
+    {
+        // Explicit recovery is needed in addition to cancelling the Undo
+        // transaction: a failed authoring operation must not leave the live
+        // Blueprint tree partially changed or require the user to click Undo.
+        bool bRestored = true;
+        for (int32 Index = Moved - 1; Index >= 0; --Index)
+        {
+            const FExternalMove& Move = Moves[Index];
+            if (Context.SCS->FindParentNode(Move.Node) == NewNode)
+                NewNode->RemoveChildNode(Move.Node, true);
+            Move.Node->ParentComponentOrVariableName = Move.OriginalParentName;
+            Move.Node->ParentComponentOwnerClassName = Move.OriginalOwnerName;
+            Move.Node->bIsParentComponentNative = Move.bOriginalNative;
+            Move.Node->AttachToName = Move.OriginalSocket;
+            if (!Context.SCS->GetRootNodes().Contains(Move.Node))
+                Context.SCS->AddNode(Move.Node);
+            USceneComponent* Template = Cast<USceneComponent>(Move.Node->ComponentTemplate.Get());
+            bRestored &= IsValid(Template) &&
+                SetAuthoredTemplateRelative(Template, Move.OriginalRelative, TEXT("External group rollback"));
+        }
+        if (!bReusePivot && Context.SCS->GetRootNodes().Contains(NewNode))
+            Context.SCS->RemoveNode(NewNode, false);
+        if (bReusePivot)
+        {
+            NewNode->AttachToName = OriginalPivotSocket;
+            bRestored &= SetAuthoredTemplateRelative(NewTemplate, OriginalPivotRelative,
+                TEXT("External existing pivot rollback"));
+        }
+        for (const FExternalMove& Move : Moves)
+        {
+            const USceneComponent* Template = Cast<USceneComponent>(Move.Node->ComponentTemplate.Get());
+            bRestored &= Context.SCS->GetRootNodes().Contains(Move.Node) &&
+                Move.Node->ParentComponentOrVariableName == Move.OriginalParentName &&
+                Move.Node->ParentComponentOwnerClassName == Move.OriginalOwnerName &&
+                Move.Node->bIsParentComponentNative == Move.bOriginalNative &&
+                Move.Node->AttachToName == Move.OriginalSocket &&
+                IsValid(Template) && Template->GetRelativeTransform().Equals(Move.OriginalRelative, 1.e-3);
+        }
+        bRestored &= bReusePivot
+            ? Context.SCS->FindSCSNode(NewName) == Context.PivotNode
+            : !Context.SCS->FindSCSNode(NewName);
+        Transaction.Cancel();
+        if (!bRestored)
+        {
+            UE_LOG(LogOriginHierarchyAuthoring, Error,
+                TEXT("External parent grouping rollback incomplete for '%s'. DO NOT SAVE."),
+                *GetNameSafe(Context.Blueprint));
+            Reason = LOCTEXT("ExternalGroupRollbackFailed", "Native-parent grouping failed and rollback was incomplete. Reopen the Blueprint without saving and report the Output Log.");
+        }
+        else Reason = LOCTEXT("ExternalGroupRejected", "Unreal rejected native-parent grouping. The original component hierarchy was restored.");
+        return false;
+    }
+
     OutNewPivotVariable = NewName;
-    NotifyStructure(Context);
+    FContext NotifyContext;
+    NotifyContext.Blueprint = Context.Blueprint;
+    NotifyStructure(NotifyContext);
     Reason = FText::GetEmpty();
     return true;
+}
+} // namespace
+
+bool FOriginHierarchyAuthoring::GroupExternalParentSiblings(UOriginPivotComponent* Pivot,
+    const TArray<FName>& Variables, FName& OutNewPivotVariable, FText& Reason)
+{
+    return GroupExternalParentSiblingsInternal(Pivot, Variables, OutNewPivotVariable, Reason, false);
+}
+
+bool FOriginHierarchyAuthoring::CanAdoptExternalParentSiblings(UOriginPivotComponent* Pivot)
+{
+    FExternalParentContext Context;
+    FText Reason;
+    return ResolveExternalParentContext(Pivot, Context, Reason) &&
+        Context.PivotNode->GetChildNodes().IsEmpty() && !HasAuthoredPivotPoses(Context.Pivot);
+}
+
+bool FOriginHierarchyAuthoring::AdoptExternalParentSiblings(UOriginPivotComponent* Pivot,
+    const TArray<FName>& Variables, FText& Reason)
+{
+    FName UsedPivot;
+    return GroupExternalParentSiblingsInternal(Pivot, Variables, UsedPivot, Reason, true);
+}
+
+bool FOriginHierarchyAuthoring::InsertSharedPivotAboveSiblings(UOriginPivotComponent* Pivot,
+    const TArray<FName>& Variables, FName& OutNewPivotVariable, FText& Reason)
+{
+    OutNewPivotVariable = NAME_None;
+    FContext Context;
+    if (!ResolveContext(Pivot, Context, Reason))
+        return GroupExternalParentSiblings(Pivot, Variables, OutNewPivotVariable, Reason);
+    return InsertSharedPivotAtParent(Context, Context.ParentNode, Variables, OutNewPivotVariable, Reason);
 }
 
 #undef LOCTEXT_NAMESPACE

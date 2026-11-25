@@ -1,4 +1,4 @@
-> **Origin 2.0.0-alpha.5.7.1 development preview** — The Alpha 5.7 hierarchy changes passed 118/118 native regression tests and 16/16 targeted cross-pivot tests. This hotfix addresses the separate physical Blueprint Save/Reload integration test: it keeps its temporary Saved-backed mount available for deferred editor validators and verifies the mount cannot resolve into project Content. UE 5.8.3 integration retest and Win64 packaging are pending. [Alpha 5.7.1 persistence hotfix](Doc/ALPHA_5_7_1_PERSISTENCE_FIX.md).
+> **Origin 2.0.0-alpha.5.8.2 (source; UE 5.8.3 validation pending):** Fixes native/inherited-parent hierarchy registration defects found by the user (Alpha 5.8.1: 143/147 regression, four failures), adds **Add Selection to This Pivot** so empty Origin Pivots can adopt native-parent siblings without another Pivot, and reorganizes the Pivot Details panel for everyday use. The native-parent suite now targets 13 tests and the total functional regression targets 154; neither has been run on this source. The separate preexisting save/reload test previously passed 1/1 but does not cover the new native-parent path. [Alpha 5.8.2 notes and test gate](Doc/ALPHA_5_8_2_NATIVE_PARENT_FIX_AND_UX.md).
 
 # Origin
 
@@ -50,6 +50,10 @@ Run the functional native regression tests in one Output Log command: `Origin.Te
 ### Blueprint Multi-Component Hierarchy Authoring (Alpha 5.5)
 
 In an authored Blueprint, the **Origin Pivot Component Details → Multi-Component Hierarchy Authoring** group supports batch reparenting of siblings, promoting/detaching child components, and inserting one shared pivot for multiple child branches. All batch operations preserve authored placement, reject mixed invalid selections before editing, and use a single native Undo transaction. Detach goes to the **authored Blueprint root**, not outside the owning Actor. Inherited/native and socket-attached component reparenting remain conservatively unsupported. See the [Alpha 5.5 guide](Doc/ALPHA_5_5_BLUEPRINT_BATCH_HIERARCHY.md).
+
+### Native/Inherited Parent Sibling Grouping (Alpha 5.8.1)
+
+Open the Third Person template's Character Blueprint and select an **Origin Pivot** authored beneath its native **Mesh (CharacterMesh0)**. Expand **Origin > Blueprint Hierarchy**. Select authored same-parent components in **Sibling Components**, then choose **Add Selection to This Pivot** (reuses an empty selected Pivot, with no duplicate) or **Create New Pivot for Selection** (explicitly inserts another Pivot). The chosen Pivot inherits the common parent/socket, while selected branches become ordinary children. Native Mesh and other inherited components cannot be moved or edited by this command; mixed sockets, absolute axes and unsafe transforms are rejected. [Alpha 5.8.1 details and tests](Doc/ALPHA_5_8_1_NATIVE_PARENT_GROUPING.md).
 
 ### Adjustable Assembly Pivots
 

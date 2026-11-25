@@ -5,6 +5,7 @@
 #if WITH_DEV_AUTOMATION_TESTS
 #include "OriginPivotComponent.h"
 #include "Components/SceneComponent.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "Editor.h"
 #include "Editor/TransBuffer.h"
 #include "Editor/Transactor.h"
@@ -12,6 +13,7 @@
 #include "Engine/SCS_Node.h"
 #include "Engine/SimpleConstructionScript.h"
 #include "GameFramework/Actor.h"
+#include "GameFramework/Character.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "Misc/AutomationTest.h"
 #include "Misc/Guid.h"
@@ -37,7 +39,8 @@ namespace
     {
         TStrongObjectPtr<UBlueprint> Blueprint;
         bool Build(FAutomationTestBase& Test, bool bTransactional = false,
-            UPackage* ExplicitPackage = nullptr, FName ExplicitAssetName = NAME_None)
+            UPackage* ExplicitPackage = nullptr, FName ExplicitAssetName = NAME_None,
+            UClass* FixtureParentClass = nullptr)
         {
             UPackage* Package = ExplicitPackage ? ExplicitPackage : (bTransactional
                 ? CreatePackage(*FString::Printf(TEXT("/Temp/OriginBatchUndo_%s"),
@@ -45,7 +48,8 @@ namespace
             const FName BPName = ExplicitAssetName.IsNone()
                 ? FName(*FString::Printf(TEXT("OriginBatchQA_%s"),
                     *FGuid::NewGuid().ToString(EGuidFormats::Digits))) : ExplicitAssetName;
-            Blueprint.Reset(FKismetEditorUtilities::CreateBlueprint(AActor::StaticClass(), Package,
+            Blueprint.Reset(FKismetEditorUtilities::CreateBlueprint(
+                FixtureParentClass ? FixtureParentClass : AActor::StaticClass(), Package,
                 BPName, BPTYPE_Normal, TEXT("OriginBatchHierarchyTests")));
             if (!Test.TestNotNull(TEXT("Blueprint fixture"), Blueprint.Get())) return false;
             USimpleConstructionScript* Script = SCS();
@@ -899,6 +903,972 @@ bool FOriginTransferUndo::RunTest(const FString& Parameters)
     return true;
 }
 
+// Alpha 5.8: A socket-aware INSERT is an exact parent-socket handoff, not a
+// generic socket reparent. Every assertion checks authored SCS attachment
+// metadata AND the complete local child-to-socket transform before/after.
+// This remains safe for animated bones because the original parent and socket
+// name are identical; no sampling of an animation frame is required.
+BATCH_TEST(FOriginSocketInsertOne, "Origin.Editor.Hierarchy.Blueprint.Socket.SingleHandoffPreservesBranch")
+bool FOriginSocketInsertOne::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!F.Build(*this)) return false;
+    F.Node(TEXT("ChildA"))->AttachToName = TEXT("GripSocket");
+    const FTransform BeforeChild = F.Relative(TEXT("ChildA"));
+    const FTransform BeforeGrandchild = F.Relative(TEXT("Grandchild")) * BeforeChild;
+    FName Created;
+    FText Reason;
+    if (!TestTrue(TEXT("Insert pivot into a socket-attached branch"),
+        FOriginHierarchyAuthoring::InsertPivotAboveChild(F.Pivot(), TEXT("ChildA"), Created, Reason)))
+    { AddError(Reason.ToString()); return false; }
+    TestTrue(TEXT("New pivot remains below the SAME source parent"), F.IsUnder(Created, TEXT("Outer")));
+    TestTrue(TEXT("Existing child is below the new pivot"), F.IsUnder(TEXT("ChildA"), Created));
+    TestTrue(TEXT("Socket name transferred exactly"), F.Node(Created)->AttachToName == TEXT("GripSocket"));
+    TestTrue(TEXT("Original child no longer owns the socket"), F.Node(TEXT("ChildA"))->AttachToName.IsNone());
+    TestTrue(TEXT("Placement in unchanged socket frame"),
+        (F.Relative(TEXT("ChildA")) * F.Relative(Created)).Equals(BeforeChild, 1.e-3));
+    TestTrue(TEXT("Descendant placement in unchanged socket frame"),
+        (F.Relative(TEXT("Grandchild")) * F.Relative(TEXT("ChildA")) * F.Relative(Created)).Equals(BeforeGrandchild, 1.e-3));
+    return true;
+}
+
+BATCH_TEST(FOriginSocketInsertOneCompile, "Origin.Editor.Hierarchy.Blueprint.Socket.SingleHandoffSurvivesCompile")
+bool FOriginSocketInsertOneCompile::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!F.Build(*this)) return false;
+    F.Node(TEXT("ChildA"))->AttachToName = TEXT("GripSocket");
+    const FTransform Before = F.Relative(TEXT("ChildA"));
+    FName Created;
+    FText Reason;
+    if (!TestTrue(TEXT("Socket insertion"), FOriginHierarchyAuthoring::InsertPivotAboveChild(
+        F.Pivot(), TEXT("ChildA"), Created, Reason)))
+    { AddError(Reason.ToString()); return false; }
+    FKismetEditorUtilities::CompileBlueprint(F.Blueprint.Get(), EBlueprintCompileOptions::SkipGarbageCollection, nullptr);
+    TestTrue(TEXT("Inserted pivot retained"), IsValid(F.Node(Created)) &&
+        F.Node(Created)->ComponentTemplate->IsA<UOriginPivotComponent>());
+    TestTrue(TEXT("Socket handoff retained by Blueprint compilation"),
+        F.IsUnder(TEXT("ChildA"), Created) && F.Node(Created)->AttachToName == TEXT("GripSocket") &&
+        F.Node(TEXT("ChildA"))->AttachToName.IsNone());
+    TestTrue(TEXT("Socket-space placement retained by Blueprint compilation"),
+        (F.Relative(TEXT("ChildA")) * F.Relative(Created)).Equals(Before, 1.e-3));
+    return true;
+}
+
+BATCH_TEST(FOriginSocketInsertTwo, "Origin.Editor.Hierarchy.Blueprint.Socket.SharedSameSocketPreservesBranches")
+bool FOriginSocketInsertTwo::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!F.Build(*this)) return false;
+    F.Node(TEXT("ChildA"))->AttachToName = TEXT("GripSocket");
+    F.Node(TEXT("ChildB"))->AttachToName = TEXT("GripSocket");
+    const FTransform BeforeA = F.Relative(TEXT("ChildA"));
+    const FTransform BeforeB = F.Relative(TEXT("ChildB"));
+    const FTransform BeforeGrandchild = F.Relative(TEXT("Grandchild")) * BeforeA;
+    const int32 OldCount = F.SCS()->GetAllNodes().Num();
+    FName Created;
+    FText Reason;
+    if (!TestTrue(TEXT("Group children on the same socket"),
+        FOriginHierarchyAuthoring::InsertSharedPivotAboveChildren(F.Pivot(),
+            Names({TEXT("ChildA"), TEXT("ChildB")}), Created, Reason)))
+    { AddError(Reason.ToString()); return false; }
+    TestEqual(TEXT("Exactly one Pivot added"), F.SCS()->GetAllNodes().Num(), OldCount + 1);
+    TestTrue(TEXT("Common socket moved to new Pivot"),
+        F.IsUnder(Created, TEXT("Outer")) && F.Node(Created)->AttachToName == TEXT("GripSocket"));
+    TestTrue(TEXT("Both children now under Pivot with sockets cleared"),
+        F.IsUnder(TEXT("ChildA"), Created) && F.IsUnder(TEXT("ChildB"), Created) &&
+        F.Node(TEXT("ChildA"))->AttachToName.IsNone() && F.Node(TEXT("ChildB"))->AttachToName.IsNone());
+    TestTrue(TEXT("A in original socket frame"),
+        (F.Relative(TEXT("ChildA")) * F.Relative(Created)).Equals(BeforeA, 1.e-3));
+    TestTrue(TEXT("B in original socket frame"),
+        (F.Relative(TEXT("ChildB")) * F.Relative(Created)).Equals(BeforeB, 1.e-3));
+    TestTrue(TEXT("Grandchild in original socket frame"),
+        (F.Relative(TEXT("Grandchild")) * F.Relative(TEXT("ChildA")) * F.Relative(Created)).Equals(BeforeGrandchild, 1.e-3));
+    TestTrue(TEXT("Unselected child stays under original Pivot"), F.IsUnder(TEXT("ChildC"), TEXT("Outer")));
+    return true;
+}
+
+BATCH_TEST(FOriginSocketInsertThree, "Origin.Editor.Hierarchy.Blueprint.Socket.SharedThreeChildrenPreserve")
+bool FOriginSocketInsertThree::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!F.Build(*this)) return false;
+    for (const FName Name : Names({TEXT("ChildA"), TEXT("ChildB"), TEXT("ChildC")}))
+        F.Node(Name)->AttachToName = TEXT("GripSocket");
+    TMap<FName, FTransform> Original;
+    for (const FName Name : Names({TEXT("ChildA"), TEXT("ChildB"), TEXT("ChildC")}))
+        Original.Add(Name, F.Relative(Name));
+    FName Created;
+    FText Reason;
+    if (!TestTrue(TEXT("Group three children under a socket Pivot"),
+        FOriginHierarchyAuthoring::InsertSharedPivotAboveChildren(F.Pivot(),
+            Names({TEXT("ChildA"), TEXT("ChildB"), TEXT("ChildC")}), Created, Reason)))
+    { AddError(Reason.ToString()); return false; }
+    TestTrue(TEXT("Same socket on new Pivot"), F.Node(Created)->AttachToName == TEXT("GripSocket"));
+    for (const FName Name : Names({TEXT("ChildA"), TEXT("ChildB"), TEXT("ChildC")}))
+        TestTrue(*FString::Printf(TEXT("%s unchanged in socket frame"), *Name.ToString()),
+            F.IsUnder(Name, Created) && F.Node(Name)->AttachToName.IsNone() &&
+            (F.Relative(Name) * F.Relative(Created)).Equals(Original[Name], 1.e-3));
+    return true;
+}
+
+BATCH_TEST(FOriginSocketDifferentSockets, "Origin.Editor.Hierarchy.Blueprint.Socket.RejectDifferentSocketsAtomically")
+bool FOriginSocketDifferentSockets::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!F.Build(*this)) return false;
+    F.Node(TEXT("ChildA"))->AttachToName = TEXT("GripSocket");
+    F.Node(TEXT("ChildB"))->AttachToName = TEXT("MuzzleSocket");
+    const int32 Count = F.SCS()->GetAllNodes().Num();
+    const FTransform Before = F.Relative(TEXT("ChildA"));
+    FName Created;
+    FText Reason;
+    TestFalse(TEXT("Cannot combine different animated socket frames"),
+        FOriginHierarchyAuthoring::InsertSharedPivotAboveChildren(F.Pivot(),
+            Names({TEXT("ChildA"), TEXT("ChildB")}), Created, Reason));
+    TestTrue(TEXT("Useful reason"), !Reason.IsEmpty());
+    TestTrue(TEXT("No new Pivot"), Created.IsNone() && F.SCS()->GetAllNodes().Num() == Count);
+    TestTrue(TEXT("Original parents and socket names retained"),
+        F.IsUnder(TEXT("ChildA"), TEXT("Outer")) && F.IsUnder(TEXT("ChildB"), TEXT("Outer")) &&
+        F.Node(TEXT("ChildA"))->AttachToName == TEXT("GripSocket") &&
+        F.Node(TEXT("ChildB"))->AttachToName == TEXT("MuzzleSocket"));
+    TestTrue(TEXT("Original transform retained"), F.Relative(TEXT("ChildA")).Equals(Before, 1.e-3));
+    return true;
+}
+
+BATCH_TEST(FOriginSocketMixedNone, "Origin.Editor.Hierarchy.Blueprint.Socket.RejectSocketAndUnattachedMix")
+bool FOriginSocketMixedNone::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!F.Build(*this)) return false;
+    F.Node(TEXT("ChildA"))->AttachToName = TEXT("GripSocket");
+    FName Created;
+    FText Reason;
+    TestFalse(TEXT("Socket and ordinary parent frames cannot be merged"),
+        FOriginHierarchyAuthoring::InsertSharedPivotAboveChildren(F.Pivot(),
+            Names({TEXT("ChildA"), TEXT("ChildB")}), Created, Reason));
+    TestTrue(TEXT("No topology changed"), Created.IsNone() && F.IsUnder(TEXT("ChildA"), TEXT("Outer")) &&
+        F.IsUnder(TEXT("ChildB"), TEXT("Outer")) && F.Node(TEXT("ChildA"))->AttachToName == TEXT("GripSocket"));
+    return true;
+}
+
+BATCH_TEST(FOriginSocketInvalidBatch, "Origin.Editor.Hierarchy.Blueprint.Socket.RejectValidAndInvalidSelection")
+bool FOriginSocketInvalidBatch::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!F.Build(*this)) return false;
+    F.Node(TEXT("ChildA"))->AttachToName = TEXT("GripSocket");
+    const int32 Count = F.SCS()->GetAllNodes().Num();
+    FName Created;
+    FText Reason;
+    TestFalse(TEXT("Mixed direct and non-direct child selection rejected"),
+        FOriginHierarchyAuthoring::InsertSharedPivotAboveChildren(F.Pivot(),
+            Names({TEXT("ChildA"), TEXT("SiblingA")}), Created, Reason));
+    TestTrue(TEXT("No inserted node or lost socket"),
+        Created.IsNone() && F.SCS()->GetAllNodes().Num() == Count &&
+        F.IsUnder(TEXT("ChildA"), TEXT("Outer")) && F.Node(TEXT("ChildA"))->AttachToName == TEXT("GripSocket"));
+    return true;
+}
+
+BATCH_TEST(FOriginSocketDuplicateBatch, "Origin.Editor.Hierarchy.Blueprint.Socket.RejectDuplicateSelection")
+bool FOriginSocketDuplicateBatch::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!F.Build(*this)) return false;
+    F.Node(TEXT("ChildA"))->AttachToName = TEXT("GripSocket");
+    FName Created;
+    FText Reason;
+    TestFalse(TEXT("Same authored node selected twice rejected"),
+        FOriginHierarchyAuthoring::InsertSharedPivotAboveChildren(F.Pivot(),
+            Names({TEXT("ChildA"), TEXT("ChildA")}), Created, Reason));
+    TestTrue(TEXT("Socket and parent retained"),
+        Created.IsNone() && F.IsUnder(TEXT("ChildA"), TEXT("Outer")) &&
+        F.Node(TEXT("ChildA"))->AttachToName == TEXT("GripSocket"));
+    return true;
+}
+
+BATCH_TEST(FOriginSocketSharedCompile, "Origin.Editor.Hierarchy.Blueprint.Socket.SharedHandoffSurvivesCompile")
+bool FOriginSocketSharedCompile::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!F.Build(*this)) return false;
+    F.Node(TEXT("ChildA"))->AttachToName = TEXT("GripSocket");
+    F.Node(TEXT("ChildB"))->AttachToName = TEXT("GripSocket");
+    const FTransform BeforeA = F.Relative(TEXT("ChildA"));
+    const FTransform BeforeB = F.Relative(TEXT("ChildB"));
+    FName Created;
+    FText Reason;
+    if (!TestTrue(TEXT("Socket grouping"), FOriginHierarchyAuthoring::InsertSharedPivotAboveChildren(
+        F.Pivot(), Names({TEXT("ChildA"), TEXT("ChildB")}), Created, Reason)))
+    { AddError(Reason.ToString()); return false; }
+    FKismetEditorUtilities::CompileBlueprint(F.Blueprint.Get(), EBlueprintCompileOptions::SkipGarbageCollection, nullptr);
+    TestTrue(TEXT("Compiled Pivot owns socket"), IsValid(F.Node(Created)) &&
+        F.Node(Created)->AttachToName == TEXT("GripSocket"));
+    TestTrue(TEXT("Compiled children remain under inserted Pivot, with no sockets"),
+        F.IsUnder(TEXT("ChildA"), Created) && F.IsUnder(TEXT("ChildB"), Created) &&
+        F.Node(TEXT("ChildA"))->AttachToName.IsNone() && F.Node(TEXT("ChildB"))->AttachToName.IsNone());
+    TestTrue(TEXT("A frame"), (F.Relative(TEXT("ChildA")) * F.Relative(Created)).Equals(BeforeA, 1.e-3));
+    TestTrue(TEXT("B frame"), (F.Relative(TEXT("ChildB")) * F.Relative(Created)).Equals(BeforeB, 1.e-3));
+    return true;
+}
+
+BATCH_TEST(FOriginSocketList, "Origin.Editor.Hierarchy.Blueprint.Socket.DiscoveryOnlyInsertableChildren")
+bool FOriginSocketList::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!F.Build(*this)) return false;
+    F.Node(TEXT("ChildA"))->AttachToName = TEXT("GripSocket");
+    TArray<FName> Siblings, Children, Insertable;
+    FOriginHierarchyAuthoring::ListSiblingsAndChildren(F.Pivot(), Siblings, Children);
+    FOriginHierarchyAuthoring::ListInsertableChildren(F.Pivot(), Insertable);
+    TestFalse(TEXT("Promote/transfer selection excludes socket"), Children.Contains(TEXT("ChildA")));
+    TestTrue(TEXT("Insert selection includes socket"), Insertable.Contains(TEXT("ChildA")));
+    TestTrue(TEXT("Normal child remains eligible"), Children.Contains(TEXT("ChildB")) &&
+        Insertable.Contains(TEXT("ChildB")));
+    TestTrue(TEXT("Discovery never edits socket"), F.Node(TEXT("ChildA"))->AttachToName == TEXT("GripSocket") &&
+        F.IsUnder(TEXT("ChildA"), TEXT("Outer")));
+    return true;
+}
+
+BATCH_TEST(FOriginSocketReparentReject, "Origin.Editor.Hierarchy.Blueprint.Socket.PromoteDetachAndTransferStayProtected")
+bool FOriginSocketReparentReject::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!F.Build(*this)) return false;
+    F.Node(TEXT("ChildA"))->AttachToName = TEXT("GripSocket");
+    FText Reason;
+    TestFalse(TEXT("Promotion cannot reinterpret socket"),
+        FOriginHierarchyAuthoring::PromoteChild(F.Pivot(), TEXT("ChildA"), Reason));
+    TestFalse(TEXT("Detach cannot reinterpret socket"),
+        FOriginHierarchyAuthoring::DetachChildrenToRoot(F.Pivot(), Names({TEXT("ChildA")}), Reason));
+    TestFalse(TEXT("Transfer cannot reinterpret socket"),
+        FOriginHierarchyAuthoring::TransferChildrenToPivot(F.Pivot(), TEXT("Inner"),
+            Names({TEXT("ChildA")}), Reason));
+    TestTrue(TEXT("All rejections preserve state"),
+        F.IsUnder(TEXT("ChildA"), TEXT("Outer")) && F.Node(TEXT("ChildA"))->AttachToName == TEXT("GripSocket"));
+    return true;
+}
+
+BATCH_TEST(FOriginSocketAbsoluteReject, "Origin.Editor.Hierarchy.Blueprint.Socket.RejectAbsoluteSocketChild")
+bool FOriginSocketAbsoluteReject::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!F.Build(*this)) return false;
+    USceneComponent* Template = Cast<USceneComponent>(F.Node(TEXT("ChildA"))->ComponentTemplate.Get());
+    if (!TestNotNull(TEXT("Child template"), Template)) return false;
+    Template->SetUsingAbsoluteLocation(true);
+    F.Node(TEXT("ChildA"))->AttachToName = TEXT("GripSocket");
+    FName Created;
+    FText Reason;
+    TestFalse(TEXT("Absolute location makes handoff unsafe"),
+        FOriginHierarchyAuthoring::InsertPivotAboveChild(F.Pivot(), TEXT("ChildA"), Created, Reason));
+    TestTrue(TEXT("Original parent and socket unchanged"),
+        Created.IsNone() && F.IsUnder(TEXT("ChildA"), TEXT("Outer")) &&
+        F.Node(TEXT("ChildA"))->AttachToName == TEXT("GripSocket"));
+    return true;
+}
+
+BATCH_TEST(FOriginSocketOneUndo, "Origin.Editor.Hierarchy.Blueprint.Socket.Transaction.SingleUndoRedoRestoresSocket")
+bool FOriginSocketOneUndo::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!F.Build(*this, true)) return false;
+    F.Node(TEXT("ChildA"))->AttachToName = TEXT("GripSocket");
+    const FTransform Before = F.Relative(TEXT("ChildA"));
+    FPrivateUndo Undo;
+    UTransBuffer* Buffer = Undo.Get();
+    if (!TestNotNull(TEXT("Private Undo buffer"), Buffer)) return false;
+    FName Created;
+    FText Reason;
+    if (!TestTrue(TEXT("Transactional socket insertion"),
+        FOriginHierarchyAuthoring::InsertPivotAboveChild(F.Pivot(), TEXT("ChildA"), Created, Reason)))
+    { AddError(Reason.ToString()); return false; }
+    TestEqual(TEXT("One Undo entry"), Buffer->GetQueueLength(), 1);
+    if (!TestTrue(TEXT("Undo"), Buffer->Undo(true))) return false;
+    TestTrue(TEXT("Undo restores original parent/socket"),
+        F.IsUnder(TEXT("ChildA"), TEXT("Outer")) &&
+        F.Node(TEXT("ChildA"))->AttachToName == TEXT("GripSocket") &&
+        F.Relative(TEXT("ChildA")).Equals(Before, 1.e-3));
+    if (!TestTrue(TEXT("Redo"), Buffer->Redo())) return false;
+    TestTrue(TEXT("Redo restores handoff"),
+        F.IsUnder(TEXT("ChildA"), Created) && F.Node(Created)->AttachToName == TEXT("GripSocket") &&
+        F.Node(TEXT("ChildA"))->AttachToName.IsNone() &&
+        (F.Relative(TEXT("ChildA")) * F.Relative(Created)).Equals(Before, 1.e-3));
+    return true;
+}
+
+BATCH_TEST(FOriginSocketSharedUndo, "Origin.Editor.Hierarchy.Blueprint.Socket.Transaction.SharedUndoRedoRestoresSockets")
+bool FOriginSocketSharedUndo::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!F.Build(*this, true)) return false;
+    F.Node(TEXT("ChildA"))->AttachToName = TEXT("GripSocket");
+    F.Node(TEXT("ChildB"))->AttachToName = TEXT("GripSocket");
+    const FTransform BeforeA = F.Relative(TEXT("ChildA"));
+    const FTransform BeforeB = F.Relative(TEXT("ChildB"));
+    FPrivateUndo Undo;
+    UTransBuffer* Buffer = Undo.Get();
+    if (!TestNotNull(TEXT("Private Undo buffer"), Buffer)) return false;
+    FName Created;
+    FText Reason;
+    if (!TestTrue(TEXT("Transactional shared socket insertion"),
+        FOriginHierarchyAuthoring::InsertSharedPivotAboveChildren(F.Pivot(),
+            Names({TEXT("ChildA"), TEXT("ChildB")}), Created, Reason)))
+    { AddError(Reason.ToString()); return false; }
+    TestEqual(TEXT("Single Undo entry"), Buffer->GetQueueLength(), 1);
+    if (!TestTrue(TEXT("Undo"), Buffer->Undo(true))) return false;
+    TestTrue(TEXT("Undo restores original socket on both"),
+        F.IsUnder(TEXT("ChildA"), TEXT("Outer")) && F.IsUnder(TEXT("ChildB"), TEXT("Outer")) &&
+        F.Node(TEXT("ChildA"))->AttachToName == TEXT("GripSocket") &&
+        F.Node(TEXT("ChildB"))->AttachToName == TEXT("GripSocket") &&
+        F.Relative(TEXT("ChildA")).Equals(BeforeA, 1.e-3) &&
+        F.Relative(TEXT("ChildB")).Equals(BeforeB, 1.e-3));
+    if (!TestTrue(TEXT("Redo"), Buffer->Redo())) return false;
+    TestTrue(TEXT("Redo restores shared socket"),
+        F.IsUnder(TEXT("ChildA"), Created) && F.IsUnder(TEXT("ChildB"), Created) &&
+        F.Node(Created)->AttachToName == TEXT("GripSocket") &&
+        F.Node(TEXT("ChildA"))->AttachToName.IsNone() && F.Node(TEXT("ChildB"))->AttachToName.IsNone() &&
+        (F.Relative(TEXT("ChildA")) * F.Relative(Created)).Equals(BeforeA, 1.e-3) &&
+        (F.Relative(TEXT("ChildB")) * F.Relative(Created)).Equals(BeforeB, 1.e-3));
+    return true;
+}
+
+BATCH_TEST(FOriginSocketNativeParent, "Origin.Editor.Hierarchy.Blueprint.Socket.NativeAttachedAuthoredRootPreserved")
+bool FOriginSocketNativeParent::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!F.Build(*this)) return false;
+    USCS_Node* Root = F.Node(TEXT("Root"));
+    Root->bIsParentComponentNative = true;
+    Root->ParentComponentOrVariableName = TEXT("NativeParent");
+    Root->AttachToName = TEXT("InheritedSocket");
+    F.Node(TEXT("ChildA"))->AttachToName = TEXT("GripSocket");
+    const FTransform Before = F.Relative(TEXT("ChildA"));
+    FName Created;
+    FText Reason;
+    if (!TestTrue(TEXT("Socket insertion within unchanged authored root"),
+        FOriginHierarchyAuthoring::InsertPivotAboveChild(F.Pivot(), TEXT("ChildA"), Created, Reason)))
+    { AddError(Reason.ToString()); return false; }
+    TestTrue(TEXT("Unchanged native-parent metadata"),
+        Root->bIsParentComponentNative && Root->ParentComponentOrVariableName == TEXT("NativeParent") &&
+        Root->AttachToName == TEXT("InheritedSocket"));
+    TestTrue(TEXT("Local socket handoff preserved"),
+        F.Node(Created)->AttachToName == TEXT("GripSocket") &&
+        F.Node(TEXT("ChildA"))->AttachToName.IsNone() &&
+        (F.Relative(TEXT("ChildA")) * F.Relative(Created)).Equals(Before, 1.e-3));
+    return true;
+}
+
+// The sibling grouping path is the useful skeletal-attachment workflow:
+// SkeletalMesh authored in SCS -> several same-socket components plus an
+// unrelated Origin Pivot component. The new Pivot inherits the mesh socket.
+namespace
+{
+    bool BuildSocketSiblingFixture(FBatchFixture& F, FAutomationTestBase& Test, bool bTransactions = false)
+    {
+        if (!F.Build(Test, bTransactions)) return false;
+        USimpleConstructionScript* Script = F.SCS();
+        USCS_Node* Root = F.Node(TEXT("Root"));
+        if (!IsValid(Root)) return false;
+        USCS_Node* Mesh = Script->CreateNode(USkeletalMeshComponent::StaticClass(), TEXT("SocketMesh"));
+        if (!Test.TestNotNull(TEXT("Authored Skeletal Mesh parent"), Mesh)) return false;
+        Root->AddChildNode(Mesh, true);
+        USCS_Node* AuthoringPivot = Script->CreateNode(UOriginPivotComponent::StaticClass(), TEXT("SocketAuthoringPivot"));
+        USCS_Node* A = Script->CreateNode(USceneComponent::StaticClass(), TEXT("SocketSiblingA"));
+        USCS_Node* B = Script->CreateNode(USceneComponent::StaticClass(), TEXT("SocketSiblingB"));
+        if (!Test.TestNotNull(TEXT("Socket Pivot"), AuthoringPivot) ||
+            !Test.TestNotNull(TEXT("Socket child A"), A) || !Test.TestNotNull(TEXT("Socket child B"), B)) return false;
+        Mesh->AddChildNode(AuthoringPivot, true);
+        Mesh->AddChildNode(A, true);
+        Mesh->AddChildNode(B, true);
+        A->AttachToName = TEXT("HandSocket");
+        B->AttachToName = TEXT("HandSocket");
+        auto Set = [](USCS_Node* Node, const FTransform& Desired)
+        {
+            if (USceneComponent* T = Cast<USceneComponent>(Node->ComponentTemplate.Get()))
+                T->SetRelativeTransform_Direct(Desired);
+        };
+        Set(A, FTransform(FRotator(0, 20, 0), FVector(10, 20, 30), FVector::OneVector));
+        Set(B, FTransform(FRotator(0, -15, 0), FVector(-25, 5, 12), FVector::OneVector));
+        Set(AuthoringPivot, FTransform(FRotator::ZeroRotator, FVector(5, 0, 0), FVector::OneVector));
+        FKismetEditorUtilities::CompileBlueprint(F.Blueprint.Get(), EBlueprintCompileOptions::SkipGarbageCollection, nullptr);
+        return Test.TestNotNull(TEXT("Compiled skeletal parent fixture"), F.Node(TEXT("SocketMesh")));
+    }
+}
+
+BATCH_TEST(FOriginSocketSiblingTwo, "Origin.Editor.Hierarchy.Blueprint.Socket.SiblingGroupSameMeshSocket")
+bool FOriginSocketSiblingTwo::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!BuildSocketSiblingFixture(F, *this)) return false;
+    const FTransform BeforeA = F.Relative(TEXT("SocketSiblingA"));
+    const FTransform BeforeB = F.Relative(TEXT("SocketSiblingB"));
+    FName Created;
+    FText Reason;
+    if (!TestTrue(TEXT("Group skeletal mesh socket siblings"),
+        FOriginHierarchyAuthoring::InsertSharedPivotAboveSiblings(F.Pivot(TEXT("SocketAuthoringPivot")),
+            Names({TEXT("SocketSiblingA"), TEXT("SocketSiblingB")}), Created, Reason)))
+    { AddError(Reason.ToString()); return false; }
+    TestTrue(TEXT("New Origin Pivot attached beneath same Skeletal Mesh"),
+        F.IsUnder(Created, TEXT("SocketMesh")) && F.Node(Created)->AttachToName == TEXT("HandSocket"));
+    TestTrue(TEXT("Both children now normal children of new Pivot"),
+        F.IsUnder(TEXT("SocketSiblingA"), Created) && F.IsUnder(TEXT("SocketSiblingB"), Created) &&
+        F.Node(TEXT("SocketSiblingA"))->AttachToName.IsNone() &&
+        F.Node(TEXT("SocketSiblingB"))->AttachToName.IsNone());
+    TestTrue(TEXT("A preserves mesh socket frame"),
+        (F.Relative(TEXT("SocketSiblingA")) * F.Relative(Created)).Equals(BeforeA, 1.e-3));
+    TestTrue(TEXT("B preserves mesh socket frame"),
+        (F.Relative(TEXT("SocketSiblingB")) * F.Relative(Created)).Equals(BeforeB, 1.e-3));
+    TestTrue(TEXT("Reference Pivot untouched"), F.IsUnder(TEXT("SocketAuthoringPivot"), TEXT("SocketMesh")));
+    return true;
+}
+
+BATCH_TEST(FOriginSocketSiblingOne, "Origin.Editor.Hierarchy.Blueprint.Socket.SiblingGroupOneSocketChild")
+bool FOriginSocketSiblingOne::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!BuildSocketSiblingFixture(F, *this)) return false;
+    const FTransform Before = F.Relative(TEXT("SocketSiblingA"));
+    FName Created;
+    FText Reason;
+    if (!TestTrue(TEXT("Group one socket-attached sibling"),
+        FOriginHierarchyAuthoring::InsertSharedPivotAboveSiblings(F.Pivot(TEXT("SocketAuthoringPivot")),
+            Names({TEXT("SocketSiblingA")}), Created, Reason)))
+    { AddError(Reason.ToString()); return false; }
+    TestTrue(TEXT("HandSocket moved to new Pivot"), F.IsUnder(Created, TEXT("SocketMesh")) &&
+        F.Node(Created)->AttachToName == TEXT("HandSocket") && F.IsUnder(TEXT("SocketSiblingA"), Created) &&
+        F.Node(TEXT("SocketSiblingA"))->AttachToName.IsNone());
+    TestTrue(TEXT("Other socket sibling not touched"), F.IsUnder(TEXT("SocketSiblingB"), TEXT("SocketMesh")) &&
+        F.Node(TEXT("SocketSiblingB"))->AttachToName == TEXT("HandSocket"));
+    TestTrue(TEXT("Placement"), (F.Relative(TEXT("SocketSiblingA")) * F.Relative(Created)).Equals(Before, 1.e-3));
+    return true;
+}
+
+BATCH_TEST(FOriginSocketSiblingReject, "Origin.Editor.Hierarchy.Blueprint.Socket.SiblingRejectMixedMeshSockets")
+bool FOriginSocketSiblingReject::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!BuildSocketSiblingFixture(F, *this)) return false;
+    F.Node(TEXT("SocketSiblingB"))->AttachToName = TEXT("HeadSocket");
+    const FTransform Before = F.Relative(TEXT("SocketSiblingA"));
+    const int32 Count = F.SCS()->GetAllNodes().Num();
+    FName Created;
+    FText Reason;
+    TestFalse(TEXT("Different skeletal sockets rejected before mutation"),
+        FOriginHierarchyAuthoring::InsertSharedPivotAboveSiblings(F.Pivot(TEXT("SocketAuthoringPivot")),
+            Names({TEXT("SocketSiblingA"), TEXT("SocketSiblingB")}), Created, Reason));
+    TestTrue(TEXT("No new Pivot or partial transfer"), Created.IsNone() &&
+        Count == F.SCS()->GetAllNodes().Num() &&
+        F.IsUnder(TEXT("SocketSiblingA"), TEXT("SocketMesh")) &&
+        F.Node(TEXT("SocketSiblingA"))->AttachToName == TEXT("HandSocket") &&
+        F.Node(TEXT("SocketSiblingB"))->AttachToName == TEXT("HeadSocket") &&
+        F.Relative(TEXT("SocketSiblingA")).Equals(Before, 1.e-3));
+    return true;
+}
+
+BATCH_TEST(FOriginSocketSiblingList, "Origin.Editor.Hierarchy.Blueprint.Socket.SiblingDiscoverySeparatesInsertAndReparent")
+bool FOriginSocketSiblingList::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!BuildSocketSiblingFixture(F, *this)) return false;
+    TArray<FName> Siblings, Children, Insertable;
+    FOriginHierarchyAuthoring::ListSiblingsAndChildren(F.Pivot(TEXT("SocketAuthoringPivot")), Siblings, Children);
+    FOriginHierarchyAuthoring::ListInsertableSiblings(F.Pivot(TEXT("SocketAuthoringPivot")), Insertable);
+    TestFalse(TEXT("Ordinary reparent excludes socket siblings"), Siblings.Contains(TEXT("SocketSiblingA")));
+    TestTrue(TEXT("Insertion discovery includes both socket siblings"),
+        Insertable.Contains(TEXT("SocketSiblingA")) && Insertable.Contains(TEXT("SocketSiblingB")));
+    TestTrue(TEXT("Discovery is nonmutating"), F.IsUnder(TEXT("SocketSiblingA"), TEXT("SocketMesh")) &&
+        F.Node(TEXT("SocketSiblingA"))->AttachToName == TEXT("HandSocket"));
+    return true;
+}
+
+BATCH_TEST(FOriginSocketSiblingCompile, "Origin.Editor.Hierarchy.Blueprint.Socket.SiblingGroupSurvivesCompile")
+bool FOriginSocketSiblingCompile::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!BuildSocketSiblingFixture(F, *this)) return false;
+    const FTransform Before = F.Relative(TEXT("SocketSiblingA"));
+    FName Created;
+    FText Reason;
+    if (!TestTrue(TEXT("Group same-socket skeletal siblings"),
+        FOriginHierarchyAuthoring::InsertSharedPivotAboveSiblings(F.Pivot(TEXT("SocketAuthoringPivot")),
+            Names({TEXT("SocketSiblingA"), TEXT("SocketSiblingB")}), Created, Reason)))
+    { AddError(Reason.ToString()); return false; }
+    FKismetEditorUtilities::CompileBlueprint(F.Blueprint.Get(), EBlueprintCompileOptions::SkipGarbageCollection, nullptr);
+    TestTrue(TEXT("Socket metadata survives recompile"), IsValid(F.Node(Created)) &&
+        F.Node(Created)->AttachToName == TEXT("HandSocket") &&
+        F.IsUnder(Created, TEXT("SocketMesh")) &&
+        F.IsUnder(TEXT("SocketSiblingA"), Created));
+    TestTrue(TEXT("Socket space placement survives compile"),
+        (F.Relative(TEXT("SocketSiblingA")) * F.Relative(Created)).Equals(Before, 1.e-3));
+    return true;
+}
+
+BATCH_TEST(FOriginSocketSiblingUndo, "Origin.Editor.Hierarchy.Blueprint.Socket.Transaction.SiblingGroupUndoRedo")
+bool FOriginSocketSiblingUndo::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!BuildSocketSiblingFixture(F, *this, true)) return false;
+    const FTransform Before = F.Relative(TEXT("SocketSiblingA"));
+    FPrivateUndo Undo;
+    UTransBuffer* Buffer = Undo.Get();
+    if (!TestNotNull(TEXT("Private Undo buffer"), Buffer)) return false;
+    FName Created;
+    FText Reason;
+    if (!TestTrue(TEXT("Transactional sibling socket group"),
+        FOriginHierarchyAuthoring::InsertSharedPivotAboveSiblings(F.Pivot(TEXT("SocketAuthoringPivot")),
+            Names({TEXT("SocketSiblingA"), TEXT("SocketSiblingB")}), Created, Reason)))
+    { AddError(Reason.ToString()); return false; }
+    TestEqual(TEXT("One Undo transaction"), Buffer->GetQueueLength(), 1);
+    if (!TestTrue(TEXT("Undo"), Buffer->Undo(true))) return false;
+    TestTrue(TEXT("Undo restores two original socket siblings"),
+        F.IsUnder(TEXT("SocketSiblingA"), TEXT("SocketMesh")) &&
+        F.IsUnder(TEXT("SocketSiblingB"), TEXT("SocketMesh")) &&
+        F.Node(TEXT("SocketSiblingA"))->AttachToName == TEXT("HandSocket") &&
+        F.Node(TEXT("SocketSiblingB"))->AttachToName == TEXT("HandSocket") &&
+        F.Relative(TEXT("SocketSiblingA")).Equals(Before, 1.e-3));
+    if (!TestTrue(TEXT("Redo"), Buffer->Redo())) return false;
+    TestTrue(TEXT("Redo restores socket group"),
+        F.IsUnder(Created, TEXT("SocketMesh")) && F.Node(Created)->AttachToName == TEXT("HandSocket") &&
+        F.IsUnder(TEXT("SocketSiblingA"), Created) && F.IsUnder(TEXT("SocketSiblingB"), Created) &&
+        (F.Relative(TEXT("SocketSiblingA")) * F.Relative(Created)).Equals(Before, 1.e-3));
+    return true;
+}
+// UE native Scene Components (e.g. ACharacter::Mesh) are not SCS nodes.
+// This fixture creates real authored SCS roots attached through native-parent
+// metadata, which is what the Third Person template uses. It resolves the
+// engine's native component template instead of making a fake authored parent.
+namespace
+{
+    bool BuildExternalMeshFixture(FBatchFixture& F, FAutomationTestBase& Test,
+        bool bTransactional = false)
+    {
+        if (!F.Build(Test, bTransactional, nullptr, NAME_None, ACharacter::StaticClass())) return false;
+        USimpleConstructionScript* SCS = F.SCS();
+        USCS_Node* Pivot = SCS->CreateNode(UOriginPivotComponent::StaticClass(), TEXT("NativeMeshPivot"));
+        USCS_Node* A = SCS->CreateNode(USceneComponent::StaticClass(), TEXT("NativeSocketA"));
+        USCS_Node* B = SCS->CreateNode(USceneComponent::StaticClass(), TEXT("NativeSocketB"));
+        USCS_Node* C = SCS->CreateNode(USceneComponent::StaticClass(), TEXT("NativeFreeC"));
+        if (!Test.TestNotNull(TEXT("Native-parent pivot root"), Pivot) ||
+            !Test.TestNotNull(TEXT("Native sibling A"), A) ||
+            !Test.TestNotNull(TEXT("Native sibling B"), B) ||
+            !Test.TestNotNull(TEXT("Native sibling C"), C)) return false;
+        for (USCS_Node* Node : {Pivot, A, B, C})
+        {
+            Node->bIsParentComponentNative = true;
+            // Owner class is used for inherited Blueprint parents, not native
+            // components. The direct C++ parent remains native in this fixture.
+            Node->ParentComponentOwnerClassName = NAME_None;
+            Node->ParentComponentOrVariableName = TEXT("Mesh");
+            SCS->AddNode(Node);
+        }
+        // The native component's object name is CharacterMesh0, while its
+        // inherited property name is Mesh. Use whichever name UE's actual
+        // native template resolution accepts, without relying on an SCS node.
+        if (!Pivot->GetParentComponentTemplate(F.Blueprint.Get()))
+            for (USCS_Node* Node : {Pivot, A, B, C})
+                Node->ParentComponentOrVariableName = TEXT("CharacterMesh0");
+        if (!Test.TestNotNull(TEXT("Resolved actual ACharacter native Mesh parent"),
+            Pivot->GetParentComponentTemplate(F.Blueprint.Get()))) return false;
+        if (!Test.TestTrue(TEXT("Same real external template resolved for siblings"),
+            A->GetParentComponentTemplate(F.Blueprint.Get()) == Pivot->GetParentComponentTemplate(F.Blueprint.Get()) &&
+            B->GetParentComponentTemplate(F.Blueprint.Get()) == Pivot->GetParentComponentTemplate(F.Blueprint.Get()))) return false;
+        A->AttachToName = TEXT("hand_r");
+        B->AttachToName = TEXT("hand_r");
+        Cast<USceneComponent>(A->ComponentTemplate.Get())->SetRelativeTransform_Direct(
+            FTransform(FRotator(0, 20, 0), FVector(60, 0, 10), FVector::OneVector));
+        Cast<USceneComponent>(B->ComponentTemplate.Get())->SetRelativeTransform_Direct(
+            FTransform(FRotator(0, -15, 0), FVector(20, 40, -5), FVector::OneVector));
+        Cast<USceneComponent>(C->ComponentTemplate.Get())->SetRelativeTransform_Direct(
+            FTransform(FRotator::ZeroRotator, FVector(5, 20, 0), FVector::OneVector));
+        FKismetEditorUtilities::CompileBlueprint(F.Blueprint.Get(),
+            EBlueprintCompileOptions::SkipGarbageCollection, nullptr);
+        return Test.TestTrue(TEXT("Character Blueprint native parent survives compile"),
+            IsValid(F.Node(TEXT("NativeMeshPivot"))) &&
+            F.Node(TEXT("NativeMeshPivot"))->GetParentComponentTemplate(F.Blueprint.Get()) != nullptr);
+    }
+}
+
+BATCH_TEST(FOriginNativeRootDiscovery, "Origin.Editor.Hierarchy.Blueprint.NativeParent.DiscoveryAndDetailsEligibility")
+bool FOriginNativeRootDiscovery::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!BuildExternalMeshFixture(F, *this)) return false;
+    UOriginPivotComponent* Pivot = F.Pivot(TEXT("NativeMeshPivot"));
+    TestFalse(TEXT("General authored-parent operations stay disabled"),
+        FOriginHierarchyAuthoring::CanEdit(Pivot));
+    TestTrue(TEXT("Safe external-parent grouping is enabled"),
+        FOriginHierarchyAuthoring::CanGroupExternalParentSiblings(Pivot));
+    TArray<FName> Eligible, SocketAttached;
+    FOriginHierarchyAuthoring::ListExternalParentSiblings(Pivot, Eligible, SocketAttached);
+    TestTrue(TEXT("Find authored roots attached to native Character Mesh"),
+        Eligible.Contains(TEXT("NativeSocketA")) && Eligible.Contains(TEXT("NativeSocketB")) &&
+        Eligible.Contains(TEXT("NativeFreeC")) && !Eligible.Contains(TEXT("NativeMeshPivot")));
+    TestTrue(TEXT("Correct socket-marked subset"), SocketAttached.Contains(TEXT("NativeSocketA")) &&
+        SocketAttached.Contains(TEXT("NativeSocketB")) && !SocketAttached.Contains(TEXT("NativeFreeC")));
+    return true;
+}
+
+BATCH_TEST(FOriginNativeRootGrouping, "Origin.Editor.Hierarchy.Blueprint.NativeParent.GroupSocketSiblingsPreservesFrame")
+bool FOriginNativeRootGrouping::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!BuildExternalMeshFixture(F, *this)) return false;
+    const FTransform ABefore = F.Relative(TEXT("NativeSocketA"));
+    const FTransform BBefore = F.Relative(TEXT("NativeSocketB"));
+    const USCS_Node* Source = F.Node(TEXT("NativeMeshPivot"));
+    const FName ParentName = Source->ParentComponentOrVariableName;
+    FName Created;
+    FText Reason;
+    if (!TestTrue(TEXT("Group sockets beneath the real native Character Mesh"),
+        FOriginHierarchyAuthoring::InsertSharedPivotAboveSiblings(F.Pivot(TEXT("NativeMeshPivot")),
+            Names({TEXT("NativeSocketA"), TEXT("NativeSocketB")}), Created, Reason)))
+    { AddError(Reason.ToString()); return false; }
+    USCS_Node* Group = F.Node(Created);
+    if (!TestNotNull(TEXT("New Pivot SCS root"), Group)) return false;
+    TestTrue(TEXT("New Pivot retains same untouched native parent"),
+        F.SCS()->GetRootNodes().Contains(Group) &&
+        Group->bIsParentComponentNative &&
+        Group->ParentComponentOrVariableName == ParentName &&
+        Group->GetParentComponentTemplate(F.Blueprint.Get()) == Source->GetParentComponentTemplate(F.Blueprint.Get()));
+    TestTrue(TEXT("Single original socket belongs to the new Pivot"), Group->AttachToName == TEXT("hand_r"));
+    TestTrue(TEXT("Authored children reparented, no stale native metadata"),
+        F.IsUnder(TEXT("NativeSocketA"), Created) && F.IsUnder(TEXT("NativeSocketB"), Created) &&
+        !F.SCS()->GetRootNodes().Contains(F.Node(TEXT("NativeSocketA"))) &&
+        F.Node(TEXT("NativeSocketA"))->ParentComponentOrVariableName.IsNone() &&
+        F.Node(TEXT("NativeSocketA"))->AttachToName.IsNone());
+    TestTrue(TEXT("Former SCS roots remain registered for Blueprint preview selection"),
+        F.SCS()->GetAllNodes().Contains(F.Node(TEXT("NativeSocketA"))) &&
+        F.SCS()->GetAllNodes().Contains(F.Node(TEXT("NativeSocketB"))) &&
+        F.SCS()->FindSCSNode(TEXT("NativeSocketA")) == F.Node(TEXT("NativeSocketA")) &&
+        F.SCS()->FindSCSNode(TEXT("NativeSocketB")) == F.Node(TEXT("NativeSocketB")));
+    TestTrue(TEXT("A preserved in native socket space"),
+        (F.Relative(TEXT("NativeSocketA")) * F.Relative(Created)).Equals(ABefore, 1.e-3));
+    TestTrue(TEXT("B preserved in native socket space"),
+        (F.Relative(TEXT("NativeSocketB")) * F.Relative(Created)).Equals(BBefore, 1.e-3));
+    TestTrue(TEXT("Reference pivot and unrelated sibling remain unchanged"),
+        F.SCS()->GetRootNodes().Contains(F.Node(TEXT("NativeMeshPivot"))) &&
+        F.SCS()->GetRootNodes().Contains(F.Node(TEXT("NativeFreeC"))));
+    return true;
+}
+
+BATCH_TEST(FOriginNativeRootRegistry, "Origin.Editor.Hierarchy.Blueprint.NativeParent.RegistryPreservedAcrossRootReparent")
+bool FOriginNativeRootRegistry::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!BuildExternalMeshFixture(F, *this)) return false;
+    const int32 CountBefore = F.SCS()->GetAllNodes().Num();
+    FName Grouped;
+    FText Reason;
+    if (!TestTrue(TEXT("Group native-parent children"),
+        FOriginHierarchyAuthoring::GroupExternalParentSiblings(F.Pivot(TEXT("NativeMeshPivot")),
+            Names({TEXT("NativeSocketA"), TEXT("NativeSocketB")}), Grouped, Reason)))
+    { AddError(Reason.ToString()); return false; }
+    TestEqual(TEXT("Exactly one new SCS node, no node lost during root reparent"),
+        F.SCS()->GetAllNodes().Num(), CountBefore + 1);
+    TestTrue(TEXT("Former roots indexed exactly once"),
+        F.SCS()->GetAllNodes().Contains(F.Node(TEXT("NativeSocketA"))) &&
+        F.SCS()->GetAllNodes().Contains(F.Node(TEXT("NativeSocketB"))) &&
+        F.SCS()->FindSCSNode(TEXT("NativeSocketA")) != nullptr &&
+        F.SCS()->FindSCSNode(TEXT("NativeSocketB")) != nullptr &&
+        F.IsUnder(TEXT("NativeSocketA"), Grouped) && F.IsUnder(TEXT("NativeSocketB"), Grouped));
+    return true;
+}
+
+BATCH_TEST(FOriginNativeRootNestedRegistry, "Origin.Editor.Hierarchy.Blueprint.NativeParent.RegistryPreservesNestedBranch")
+bool FOriginNativeRootNestedRegistry::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!BuildExternalMeshFixture(F, *this)) return false;
+    USCS_Node* Child = F.Node(TEXT("NativeSocketA"));
+    USCS_Node* Grandchild = F.SCS()->CreateNode(USceneComponent::StaticClass(),
+        TEXT("NativeSocketGrandchild"));
+    if (!TestNotNull(TEXT("Authored nested node"), Grandchild)) return false;
+    Child->AddChildNode(Grandchild, true);
+    const int32 Before = F.SCS()->GetAllNodes().Num();
+    FName Grouped;
+    FText Reason;
+    if (!TestTrue(TEXT("Group native socket branch with descendant"),
+        FOriginHierarchyAuthoring::GroupExternalParentSiblings(F.Pivot(TEXT("NativeMeshPivot")),
+            Names({TEXT("NativeSocketA"), TEXT("NativeSocketB")}), Grouped, Reason)))
+    { AddError(Reason.ToString()); return false; }
+    TestEqual(TEXT("Every existing node stays in AllNodes"), F.SCS()->GetAllNodes().Num(), Before + 1);
+    TestTrue(TEXT("Nested node remains discoverable under grouped child"),
+        F.SCS()->FindSCSNode(TEXT("NativeSocketGrandchild")) == Grandchild &&
+        F.SCS()->GetAllNodes().Contains(Grandchild) &&
+        F.IsUnder(TEXT("NativeSocketGrandchild"), TEXT("NativeSocketA")) &&
+        F.IsUnder(TEXT("NativeSocketA"), Grouped));
+    FKismetEditorUtilities::CompileBlueprint(F.Blueprint.Get(),
+        EBlueprintCompileOptions::SkipGarbageCollection, nullptr);
+    TestTrue(TEXT("Nested grouped branch remains discoverable after Blueprint compile"),
+        F.SCS()->FindSCSNode(TEXT("NativeSocketGrandchild")) != nullptr &&
+        F.IsUnder(TEXT("NativeSocketGrandchild"), TEXT("NativeSocketA")));
+    return true;
+}
+
+BATCH_TEST(FOriginNativeRootReuse, "Origin.Editor.Hierarchy.Blueprint.NativeParent.AdoptIntoSelectedPivotWithoutDuplicate")
+bool FOriginNativeRootReuse::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!BuildExternalMeshFixture(F, *this)) return false;
+    const int32 CountBefore = F.SCS()->GetAllNodes().Num();
+    const FTransform BeforeA = F.Relative(TEXT("NativeSocketA"));
+    const FTransform BeforeB = F.Relative(TEXT("NativeSocketB"));
+    UOriginPivotComponent* Pivot = F.Pivot(TEXT("NativeMeshPivot"));
+    USCS_Node* PivotNode = F.Node(TEXT("NativeMeshPivot"));
+    if (!TestTrue(TEXT("Empty reference Pivot can adopt"),
+        FOriginHierarchyAuthoring::CanAdoptExternalParentSiblings(Pivot))) return false;
+    FText Reason;
+    if (!TestTrue(TEXT("Group into the selected Pivot, rather than creating another"),
+        FOriginHierarchyAuthoring::AdoptExternalParentSiblings(Pivot,
+            Names({TEXT("NativeSocketA"), TEXT("NativeSocketB")}), Reason)))
+    { AddError(Reason.ToString()); return false; }
+    TestEqual(TEXT("No additional Origin Pivot SCS node created"),
+        F.SCS()->GetAllNodes().Num(), CountBefore);
+    TestTrue(TEXT("Selected Pivot keeps its identity and native parent"),
+        F.Node(TEXT("NativeMeshPivot")) == PivotNode &&
+        F.SCS()->GetRootNodes().Contains(PivotNode) &&
+        PivotNode->bIsParentComponentNative &&
+        PivotNode->GetParentComponentTemplate(F.Blueprint.Get()) != nullptr &&
+        PivotNode->AttachToName == TEXT("hand_r"));
+    TestTrue(TEXT("Both authored children become normal, discoverable descendants"),
+        F.IsUnder(TEXT("NativeSocketA"), TEXT("NativeMeshPivot")) &&
+        F.IsUnder(TEXT("NativeSocketB"), TEXT("NativeMeshPivot")) &&
+        F.Node(TEXT("NativeSocketA"))->AttachToName.IsNone() &&
+        F.SCS()->GetAllNodes().Contains(F.Node(TEXT("NativeSocketB"))));
+    TestTrue(TEXT("Both socket-space transforms are compensated"),
+        (F.Relative(TEXT("NativeSocketA")) * F.Relative(TEXT("NativeMeshPivot"))).Equals(BeforeA, 1.e-3) &&
+        (F.Relative(TEXT("NativeSocketB")) * F.Relative(TEXT("NativeMeshPivot"))).Equals(BeforeB, 1.e-3));
+    return true;
+}
+
+BATCH_TEST(FOriginNativeRootReuseCompile, "Origin.Editor.Hierarchy.Blueprint.NativeParent.AdoptSurvivesCompile")
+bool FOriginNativeRootReuseCompile::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!BuildExternalMeshFixture(F, *this)) return false;
+    const FTransform Before = F.Relative(TEXT("NativeSocketA"));
+    FText Reason;
+    if (!TestTrue(TEXT("Group into existing native-root Pivot"),
+        FOriginHierarchyAuthoring::AdoptExternalParentSiblings(F.Pivot(TEXT("NativeMeshPivot")),
+            Names({TEXT("NativeSocketA"), TEXT("NativeSocketB")}), Reason)))
+    { AddError(Reason.ToString()); return false; }
+    FKismetEditorUtilities::CompileBlueprint(F.Blueprint.Get(),
+        EBlueprintCompileOptions::SkipGarbageCollection, nullptr);
+    TestTrue(TEXT("Selected Pivot and children survive full Blueprint compile"),
+        F.Node(TEXT("NativeMeshPivot")) != nullptr &&
+        F.Node(TEXT("NativeMeshPivot"))->AttachToName == TEXT("hand_r") &&
+        F.IsUnder(TEXT("NativeSocketA"), TEXT("NativeMeshPivot")) &&
+        F.IsUnder(TEXT("NativeSocketB"), TEXT("NativeMeshPivot")) &&
+        (F.Relative(TEXT("NativeSocketA")) * F.Relative(TEXT("NativeMeshPivot"))).Equals(Before, 1.e-3));
+    return true;
+}
+
+BATCH_TEST(FOriginNativeRootReuseUndo, "Origin.Editor.Hierarchy.Blueprint.NativeParent.Transaction.AdoptUndoRedo")
+bool FOriginNativeRootReuseUndo::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!BuildExternalMeshFixture(F, *this, true)) return false;
+    FPrivateUndo Undo;
+    UTransBuffer* Buffer = Undo.Get();
+    if (!TestNotNull(TEXT("Undo buffer"), Buffer)) return false;
+    const FTransform Before = F.Relative(TEXT("NativeSocketA"));
+    FText Reason;
+    if (!TestTrue(TEXT("Adopt into selected native-parent Pivot"),
+        FOriginHierarchyAuthoring::AdoptExternalParentSiblings(F.Pivot(TEXT("NativeMeshPivot")),
+            Names({TEXT("NativeSocketA"), TEXT("NativeSocketB")}), Reason)))
+    { AddError(Reason.ToString()); return false; }
+    TestEqual(TEXT("Exactly one Undo transaction"), Buffer->GetQueueLength(), 1);
+    if (!TestTrue(TEXT("Undo"), Buffer->Undo(true))) return false;
+    TestTrue(TEXT("Undo restores prior root and socket hierarchy"),
+        F.SCS()->GetRootNodes().Contains(F.Node(TEXT("NativeSocketA"))) &&
+        F.Node(TEXT("NativeSocketA"))->AttachToName == TEXT("hand_r") &&
+        F.Node(TEXT("NativeMeshPivot"))->AttachToName.IsNone() &&
+        F.Relative(TEXT("NativeSocketA")).Equals(Before, 1.e-3));
+    if (!TestTrue(TEXT("Redo"), Buffer->Redo())) return false;
+    TestTrue(TEXT("Redo groups into the same Pivot without node loss"),
+        F.IsUnder(TEXT("NativeSocketA"), TEXT("NativeMeshPivot")) &&
+        F.Node(TEXT("NativeMeshPivot"))->AttachToName == TEXT("hand_r") &&
+        F.SCS()->GetAllNodes().Contains(F.Node(TEXT("NativeSocketA"))) &&
+        (F.Relative(TEXT("NativeSocketA")) * F.Relative(TEXT("NativeMeshPivot"))).Equals(Before, 1.e-3));
+    return true;
+}
+
+BATCH_TEST(FOriginNativeRootReuseGuard, "Origin.Editor.Hierarchy.Blueprint.NativeParent.AdoptRejectsOccupiedPivot")
+bool FOriginNativeRootReuseGuard::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!BuildExternalMeshFixture(F, *this)) return false;
+    USCS_Node* Occupant = F.SCS()->CreateNode(USceneComponent::StaticClass(), TEXT("AlreadyUnderPivot"));
+    F.Node(TEXT("NativeMeshPivot"))->AddChildNode(Occupant, true);
+    const int32 Before = F.SCS()->GetAllNodes().Num();
+    TestFalse(TEXT("Occupied Pivot not eligible for auto-adoption"),
+        FOriginHierarchyAuthoring::CanAdoptExternalParentSiblings(F.Pivot(TEXT("NativeMeshPivot"))));
+    FText Reason;
+    TestFalse(TEXT("Auto-adoption refuses to change an existing assembly's socket frame"),
+        FOriginHierarchyAuthoring::AdoptExternalParentSiblings(F.Pivot(TEXT("NativeMeshPivot")),
+            Names({TEXT("NativeSocketA")}), Reason));
+    TestTrue(TEXT("No partial mutation"),
+        Before == F.SCS()->GetAllNodes().Num() &&
+        F.IsUnder(TEXT("AlreadyUnderPivot"), TEXT("NativeMeshPivot")) &&
+        F.SCS()->GetRootNodes().Contains(F.Node(TEXT("NativeSocketA"))) &&
+        F.Node(TEXT("NativeMeshPivot"))->AttachToName.IsNone());
+    return true;
+}
+
+BATCH_TEST(FOriginNativeRootPoseGuard, "Origin.Editor.Hierarchy.Blueprint.NativeParent.AdoptRejectsCapturedPivotPose")
+bool FOriginNativeRootPoseGuard::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!BuildExternalMeshFixture(F, *this)) return false;
+    UOriginPivotComponent* Pivot = F.Pivot(TEXT("NativeMeshPivot"));
+    if (!TestNotNull(TEXT("Reference Pivot"), Pivot)) return false;
+    // Changing the Pivot socket would make captured slot frames stale.
+    Pivot->OriginPivotConfiguration.Slots[0].bHasSavedRelativeTransform = true;
+    Pivot->OriginPivotConfiguration.Slots[0].CapturedSocketName = NAME_None;
+    TestFalse(TEXT("Captured poses disable auto-adoption"),
+        FOriginHierarchyAuthoring::CanAdoptExternalParentSiblings(Pivot));
+    const int32 CountBefore = F.SCS()->GetAllNodes().Num();
+    FText Reason;
+    TestFalse(TEXT("Adopt refuses to invalidate captured pose socket frame"),
+        FOriginHierarchyAuthoring::AdoptExternalParentSiblings(Pivot,
+            Names({TEXT("NativeSocketA")}), Reason));
+    TestTrue(TEXT("No structural changes to saved-pose Pivot"),
+        CountBefore == F.SCS()->GetAllNodes().Num() &&
+        F.SCS()->GetRootNodes().Contains(F.Node(TEXT("NativeSocketA"))) &&
+        F.Node(TEXT("NativeMeshPivot"))->AttachToName.IsNone());
+    return true;
+}
+
+BATCH_TEST(FOriginNativeRootMixedSockets, "Origin.Editor.Hierarchy.Blueprint.NativeParent.RejectDifferentSocketsAtomically")
+bool FOriginNativeRootMixedSockets::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!BuildExternalMeshFixture(F, *this)) return false;
+    F.Node(TEXT("NativeSocketB"))->AttachToName = TEXT("head");
+    const int32 Before = F.SCS()->GetAllNodes().Num();
+    FName Created;
+    FText Reason;
+    TestFalse(TEXT("Distinct native Mesh sockets reject without mutation"),
+        FOriginHierarchyAuthoring::InsertSharedPivotAboveSiblings(F.Pivot(TEXT("NativeMeshPivot")),
+            Names({TEXT("NativeSocketA"), TEXT("NativeSocketB")}), Created, Reason));
+    TestTrue(TEXT("No SCS mutation"), Created.IsNone() && Before == F.SCS()->GetAllNodes().Num() &&
+        F.SCS()->GetRootNodes().Contains(F.Node(TEXT("NativeSocketA"))) &&
+        F.SCS()->GetRootNodes().Contains(F.Node(TEXT("NativeSocketB"))) &&
+        F.Node(TEXT("NativeSocketA"))->AttachToName == TEXT("hand_r") &&
+        F.Node(TEXT("NativeSocketB"))->AttachToName == TEXT("head"));
+    return true;
+}
+
+BATCH_TEST(FOriginNativeRootMixedAttachment, "Origin.Editor.Hierarchy.Blueprint.NativeParent.RejectSocketAndNonSocketMix")
+bool FOriginNativeRootMixedAttachment::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!BuildExternalMeshFixture(F, *this)) return false;
+    const int32 Before = F.SCS()->GetAllNodes().Num();
+    FName Created;
+    FText Reason;
+    TestFalse(TEXT("Cannot merge different parent frames"),
+        FOriginHierarchyAuthoring::GroupExternalParentSiblings(F.Pivot(TEXT("NativeMeshPivot")),
+            Names({TEXT("NativeSocketA"), TEXT("NativeFreeC")}), Created, Reason));
+    TestTrue(TEXT("No partial edit"), Created.IsNone() && Before == F.SCS()->GetAllNodes().Num());
+    return true;
+}
+
+BATCH_TEST(FOriginNativeRootDuplicate, "Origin.Editor.Hierarchy.Blueprint.NativeParent.RejectInvalidSelectionAtomically")
+bool FOriginNativeRootDuplicate::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!BuildExternalMeshFixture(F, *this)) return false;
+    FName Created;
+    FText Reason;
+    TestFalse(TEXT("Reject source Pivot in selection"),
+        FOriginHierarchyAuthoring::GroupExternalParentSiblings(F.Pivot(TEXT("NativeMeshPivot")),
+            Names({TEXT("NativeMeshPivot")}), Created, Reason));
+    TestFalse(TEXT("Reject duplicated child"),
+        FOriginHierarchyAuthoring::GroupExternalParentSiblings(F.Pivot(TEXT("NativeMeshPivot")),
+            Names({TEXT("NativeSocketA"), TEXT("NativeSocketA")}), Created, Reason));
+    TestFalse(TEXT("Reject nonexistent child"),
+        FOriginHierarchyAuthoring::GroupExternalParentSiblings(F.Pivot(TEXT("NativeMeshPivot")),
+            Names({TEXT("NativeSocketA"), TEXT("MissingChild")}), Created, Reason));
+    TestTrue(TEXT("No partial SCS topology changes"),
+        F.SCS()->GetRootNodes().Contains(F.Node(TEXT("NativeSocketA"))) &&
+        F.SCS()->GetRootNodes().Contains(F.Node(TEXT("NativeSocketB"))));
+    return true;
+}
+
+BATCH_TEST(FOriginNativeRootCompile, "Origin.Editor.Hierarchy.Blueprint.NativeParent.GroupSurvivesCompile")
+bool FOriginNativeRootCompile::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!BuildExternalMeshFixture(F, *this)) return false;
+    const FTransform Before = F.Relative(TEXT("NativeSocketA"));
+    FName Created;
+    FText Reason;
+    if (!TestTrue(TEXT("Group under native parent"),
+        FOriginHierarchyAuthoring::GroupExternalParentSiblings(F.Pivot(TEXT("NativeMeshPivot")),
+            Names({TEXT("NativeSocketA"), TEXT("NativeSocketB")}), Created, Reason)))
+    { AddError(Reason.ToString()); return false; }
+    FKismetEditorUtilities::CompileBlueprint(F.Blueprint.Get(),
+        EBlueprintCompileOptions::SkipGarbageCollection, nullptr);
+    USCS_Node* Group = F.Node(Created);
+    TestTrue(TEXT("Native parent and socket survive Blueprint compile"), IsValid(Group) &&
+        F.SCS()->GetRootNodes().Contains(Group) &&
+        Group->bIsParentComponentNative && Group->AttachToName == TEXT("hand_r") &&
+        Group->GetParentComponentTemplate(F.Blueprint.Get()) != nullptr &&
+        F.IsUnder(TEXT("NativeSocketA"), Created) &&
+        (F.Relative(TEXT("NativeSocketA")) * F.Relative(Created)).Equals(Before, 1.e-3));
+    return true;
+}
+
+BATCH_TEST(FOriginNativeRootUndo, "Origin.Editor.Hierarchy.Blueprint.NativeParent.Transaction.UndoRedo")
+bool FOriginNativeRootUndo::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!BuildExternalMeshFixture(F, *this, true)) return false;
+    FPrivateUndo Undo;
+    UTransBuffer* Buffer = Undo.Get();
+    if (!TestNotNull(TEXT("Undo buffer"), Buffer)) return false;
+    const FTransform Before = F.Relative(TEXT("NativeSocketA"));
+    FName Created;
+    FText Reason;
+    if (!TestTrue(TEXT("Native-parent group in one transaction"),
+        FOriginHierarchyAuthoring::GroupExternalParentSiblings(F.Pivot(TEXT("NativeMeshPivot")),
+            Names({TEXT("NativeSocketA"), TEXT("NativeSocketB")}), Created, Reason)))
+    { AddError(Reason.ToString()); return false; }
+    TestEqual(TEXT("One Undo step"), Buffer->GetQueueLength(), 1);
+    if (!TestTrue(TEXT("Undo"), Buffer->Undo(true))) return false;
+    TestTrue(TEXT("Undo restores two native-attached socket roots"),
+        F.SCS()->GetRootNodes().Contains(F.Node(TEXT("NativeSocketA"))) &&
+        F.SCS()->GetRootNodes().Contains(F.Node(TEXT("NativeSocketB"))) &&
+        F.Node(TEXT("NativeSocketA"))->AttachToName == TEXT("hand_r") &&
+        F.Relative(TEXT("NativeSocketA")).Equals(Before, 1.e-3));
+    if (!TestTrue(TEXT("Redo"), Buffer->Redo())) return false;
+    TestTrue(TEXT("Redo restores native-attached grouped socket"),
+        IsValid(F.Node(Created)) && F.SCS()->GetRootNodes().Contains(F.Node(Created)) &&
+        F.Node(Created)->AttachToName == TEXT("hand_r") &&
+        F.IsUnder(TEXT("NativeSocketA"), Created) &&
+        (F.Relative(TEXT("NativeSocketA")) * F.Relative(Created)).Equals(Before, 1.e-3));
+    return true;
+}
+
+BATCH_TEST(FOriginNativeRootNoSocket, "Origin.Editor.Hierarchy.Blueprint.NativeParent.GroupUnattachedSiblings")
+bool FOriginNativeRootNoSocket::RunTest(const FString& Parameters)
+{
+    FBatchFixture F;
+    if (!BuildExternalMeshFixture(F, *this)) return false;
+    FName Created;
+    FText Reason;
+    if (!TestTrue(TEXT("Group socket-free native-parent siblings"),
+        FOriginHierarchyAuthoring::GroupExternalParentSiblings(F.Pivot(TEXT("NativeMeshPivot")),
+            Names({TEXT("NativeFreeC")}), Created, Reason)))
+    { AddError(Reason.ToString()); return false; }
+    TestTrue(TEXT("Group retains native parent and no socket"),
+        F.SCS()->GetRootNodes().Contains(F.Node(Created)) &&
+        F.Node(Created)->AttachToName.IsNone() && F.IsUnder(TEXT("NativeFreeC"), Created));
+    return true;
+}
+
 // Opt-in disk persistence integration. Deliberately outside Origin.Editor.* so
 // Origin.Tests.Regression stays fast and does not perform package reloads.
 BATCH_TEST(FOriginSavedBlueprintPersistence, "Origin.Integration.Persistence.BlueprintTransferSaveReload")
@@ -975,6 +1945,12 @@ bool FOriginSavedBlueprintPersistence::RunTest(const FString& Parameters)
     const FTransform OriginalA = Fixture.InRoot(TEXT("ChildA"));
     const FTransform OriginalGrandchild = Fixture.InRoot(TEXT("Grandchild"));
     const FTransform OriginalB = Fixture.InRoot(TEXT("ChildB"));
+    const FTransform OriginalC = Fixture.InRoot(TEXT("ChildC"));
+    const FTransform OriginalBInSocket = Fixture.Relative(TEXT("ChildB"));
+    const FTransform OriginalCInSocket = Fixture.Relative(TEXT("ChildC"));
+    Fixture.Node(TEXT("ChildB"))->AttachToName = TEXT("GripSocket");
+    Fixture.Node(TEXT("ChildC"))->AttachToName = TEXT("GripSocket");
+    FName CreatedSocketPivot;
     // Physical fixtures use a transaction-bearing package, but must never
     // add an Undo entry to the user's normal editor history.
     {
@@ -986,7 +1962,11 @@ bool FOriginSavedBlueprintPersistence::RunTest(const FString& Parameters)
             FOriginHierarchyAuthoring::TransferChildrenToPivot(Fixture.Pivot(), TEXT("Inner"),
                 Names({TEXT("ChildA")}), Reason)))
         { AddError(Reason.ToString()); return false; }
-        Buffer->Reset(FText::FromString(TEXT("Origin scratch persistence test completed its edit")));
+        if (!TestTrue(TEXT("Insert a shared socket-attached Pivot before saving"),
+            FOriginHierarchyAuthoring::InsertSharedPivotAboveChildren(Fixture.Pivot(),
+                Names({TEXT("ChildB"), TEXT("ChildC")}), CreatedSocketPivot, Reason)))
+        { AddError(Reason.ToString()); return false; }
+        Buffer->Reset(FText::FromString(TEXT("Origin scratch persistence test completed its edits")));
     }
     FKismetEditorUtilities::CompileBlueprint(Fixture.Blueprint.Get(),
         EBlueprintCompileOptions::SkipGarbageCollection, nullptr);
@@ -1009,8 +1989,10 @@ bool FOriginSavedBlueprintPersistence::RunTest(const FString& Parameters)
     auto Node = [Script](FName Name) { return Script->FindSCSNode(Name); };
     USCS_Node* Child = Node(TEXT("ChildA"));
     USCS_Node* Grandchild = Node(TEXT("Grandchild"));
+    USCS_Node* ReloadedSocketPivot = Node(CreatedSocketPivot);
     if (!TestNotNull(TEXT("Reloaded moved child"), Child) ||
-        !TestNotNull(TEXT("Reloaded grandchild"), Grandchild)) return false;
+        !TestNotNull(TEXT("Reloaded grandchild"), Grandchild) ||
+        !TestNotNull(TEXT("Reloaded shared socket Pivot"), ReloadedSocketPivot)) return false;
     TestTrue(TEXT("Transferred topology survived physical save/reload"),
         Script->FindParentNode(Child) == Node(TEXT("Inner")) &&
         Script->FindParentNode(Grandchild) == Child);
@@ -1029,7 +2011,21 @@ bool FOriginSavedBlueprintPersistence::RunTest(const FString& Parameters)
     };
     TestTrue(TEXT("Moved child placement persisted"), InRoot(TEXT("ChildA")).Equals(OriginalA, 1.e-3));
     TestTrue(TEXT("Grandchild placement persisted"), InRoot(TEXT("Grandchild")).Equals(OriginalGrandchild, 1.e-3));
-    TestTrue(TEXT("Unselected child placement persisted"), InRoot(TEXT("ChildB")).Equals(OriginalB, 1.e-3));
+    TestTrue(TEXT("Socket child B placement persisted"), InRoot(TEXT("ChildB")).Equals(OriginalB, 1.e-3));
+    TestTrue(TEXT("Socket child C placement persisted"), InRoot(TEXT("ChildC")).Equals(OriginalC, 1.e-3));
+    TestTrue(TEXT("Shared socket metadata survived actual disk reload"),
+        ReloadedSocketPivot->AttachToName == TEXT("GripSocket") &&
+        Script->FindParentNode(Node(TEXT("ChildB"))) == ReloadedSocketPivot &&
+        Script->FindParentNode(Node(TEXT("ChildC"))) == ReloadedSocketPivot &&
+        Node(TEXT("ChildB"))->AttachToName.IsNone() &&
+        Node(TEXT("ChildC"))->AttachToName.IsNone());
+    const USceneComponent* SocketPivotTemplate = Cast<USceneComponent>(ReloadedSocketPivot->ComponentTemplate.Get());
+    const USceneComponent* SocketChildB = Cast<USceneComponent>(Node(TEXT("ChildB"))->ComponentTemplate.Get());
+    const USceneComponent* SocketChildC = Cast<USceneComponent>(Node(TEXT("ChildC"))->ComponentTemplate.Get());
+    TestTrue(TEXT("Socket-space transforms survived physical save/reload"),
+        IsValid(SocketPivotTemplate) && IsValid(SocketChildB) && IsValid(SocketChildC) &&
+        (SocketChildB->GetRelativeTransform() * SocketPivotTemplate->GetRelativeTransform()).Equals(OriginalBInSocket, 1.e-3) &&
+        (SocketChildC->GetRelativeTransform() * SocketPivotTemplate->GetRelativeTransform()).Equals(OriginalCInSocket, 1.e-3));
     TestTrue(TEXT("Original Pivot and nested Pivot survived"),
         IsValid(Node(TEXT("Outer"))) && IsValid(Node(TEXT("Inner"))) &&
         Node(TEXT("Inner"))->ComponentTemplate->IsA<UOriginPivotComponent>());
